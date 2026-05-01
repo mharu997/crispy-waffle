@@ -96,20 +96,71 @@ pitds retry-failed-prices     # recover tickers that hit dot/rate-limit issues
 
 ## Using PITDS from another project
 
-PITDS is a regular pip-installable Python package. To consume it from a sibling project (`AITrade`, `KalshiProject`, etc.) on the same machine:
+### What ships with the package vs what doesn't
 
-```bash
-# In the consuming project's venv:
-cd /path/to/your/other-project
-source .venv/bin/activate
-pip install -e /Users/mharutyunyan/Projects/Enso/PITDS
+The repo / pip install ships **only the code** (~50 source/doc files, ~5 MB). It does **NOT** ship the actual dataset:
 
-# Or directly from the private GitHub repo (works from any machine with
-# gh CLI auth or a Personal Access Token in the URL):
-pip install git+https://github.com/mharu997/crispy-waffle.git@main
+| Shipped in git / pip | NOT shipped (gitignored, lives only on your canonical install) |
+|---|---|
+| `src/pitds/` (the Python package) | `data/processed/prices.parquet` (~46 MB) |
+| `pyproject.toml`, `README.md`, `DESIGN.md` | `data/processed/fundamentals_facts/` (~94 MB) |
+| `tests/`, `scripts/` (launchd plist + wrapper) | `data/processed/{constituents_daily,corporate_actions,sector_history,ticker_history}.parquet` |
+| `.env.example` (template only) | `data/raw/edgar/companyfacts/CIK*.json` (~2.6 GB raw cache) |
+| | `.env` (Tiingo key, SEC user-agent) |
+
+This separation is deliberate:
+1. **Size** — 142 MB of Parquet (plus ~2.6 GB raw cache) doesn't belong in git
+2. **Vintage** — the data updates daily; you'd need a new commit per snapshot
+3. **Licensing** — Tiingo's TOS likely prohibit redistributing their data, even in a private repo
+4. **Reproducibility** — code and data should version independently (pin code v1.2 + data vintage 2026-04-30)
+
+So PITDS is **a library + an on-disk data store**. The library knows *how* to fetch and query the data; the data lives once on the canonical install (this Mac), populated by `pitds backfill-*` commands and refreshed nightly by the launchd agent.
+
+### Three patterns for sharing the data
+
+```
+        same Mac, multiple projects                    cross-machine / cloud
+
+┌──────────────────────────────────────────┐  ┌────────────────────────────────────┐
+│ A.  PITDS_DATA_DIR                       │  │ B.  Each project backfills its own │
+│     (recommended for local work)         │  │     copy                           │
+│                                          │  │                                    │
+│  ✓ 1 copy of data on disk                │  │  ✗ 142 MB × N projects             │
+│  ✓ launchd refresh updates everyone      │  │  ✗ N Tiingo API calls per day      │
+│  ✓ consumers need NO Tiingo key, NO      │  │  ✓ each project independent        │
+│    SEC user-agent (read-only)            │  │  ✓ projects can pin different      │
+│                                          │  │    vintages                        │
+└──────────────────────────────────────────┘  └────────────────────────────────────┘
+
+         ┌─────────────────────────────────────────────────────┐
+         │ C.  Cloud snapshot (S3 / DVC / git LFS)             │
+         │   - sync data/processed/ to S3 after each update    │
+         │   - consumers pull a specific snapshot when needed  │
+         │   - works across machines, CI, collaborators        │
+         │   - more setup; same Tiingo TOS caution applies     │
+         └─────────────────────────────────────────────────────┘
 ```
 
-Then in your project's code:
+For local work on this Mac with multiple sibling projects, **Option A is the right answer**.
+
+### Option A: install + read-only consumer (typical)
+
+In the consuming project (e.g. `AITrade`, `KalshiProject`, `rlmodel1`):
+
+```bash
+cd /path/to/your/other-project
+source .venv/bin/activate            # the consuming project's venv
+
+# Install the PITDS package — pick ONE
+pip install -e /Users/mharutyunyan/Projects/Enso/PITDS                  # local editable
+pip install git+https://github.com/mharu997/crispy-waffle.git@main      # from private GitHub
+
+# Tell PITDS where the canonical data lives. This is the ONLY required env var
+# for read-only consumers.
+echo 'PITDS_DATA_DIR=/Users/mharutyunyan/Projects/Enso/PITDS/data' >> .env
+```
+
+Then in the consuming project's Python code:
 
 ```python
 from pitds.pit import api
@@ -120,36 +171,45 @@ prices   = api.prices(as_of=date(2024, 6, 28), ticker='AAPL', adjust='split_div'
 revenue  = api.fact(cik='0000320193', field_name='revenue',
                     period_end=date(2024, 3, 30),
                     as_of=date(2024, 6, 28))
+sector   = api.sector(cik='0000320193', as_of=date(2024, 6, 28))
 ```
 
-### Sharing the dataset across projects
+That's it. The consuming project is read-only — it never writes, never fetches anything from Tiingo or EDGAR. The launchd agent on the canonical install keeps the shared data fresh.
 
-The Parquet files (~150 MB) live in `data/processed/` of the canonical PITDS clone. Other projects should **point to the same data directory** instead of re-downloading. Two ways:
+#### When you DO need API keys in a consumer
 
-**Option A — environment variable** (recommended; non-invasive):
+You only need to add `SEC_USER_AGENT` and `TIINGO_API_KEY` to a consumer project's `.env` if **that project itself runs backfills** (uncommon — usually you don't want this; the canonical install is the single producer). If the consumer ever calls `pitds.fundamentals.companyfacts_api.fetch_companyfacts()` for a CIK that isn't already cached, EDGAR needs `SEC_USER_AGENT`. For pure `api.*` queries against pre-backfilled data, no keys needed.
 
-In the consuming project's `.env`:
-```
-PITDS_DATA_DIR=/Users/mharutyunyan/Projects/Enso/PITDS/data
-SEC_USER_AGENT="Your Name your.email@example.com"
-TIINGO_API_KEY=...
-```
+#### Programmatic override (instead of `.env`)
 
-`pitds.config` reads `PITDS_DATA_DIR` and resolves all table paths from there.
-
-**Option B — programmatic override**:
+If the consumer doesn't use a `.env` file:
 
 ```python
 import os
 os.environ["PITDS_DATA_DIR"] = "/Users/mharutyunyan/Projects/Enso/PITDS/data"
-from pitds.pit import api          # imports re-read settings
+from pitds.pit import api    # import AFTER setting the env var
 ```
 
-The consuming project gets read-only access to whatever the canonical PITDS install has backfilled. Run `pitds update-daily` only from the canonical install (the launchd agent handles this); consumers are pure readers.
+### Option C: cloud snapshots for cross-machine reproducibility
 
-### Reproducibility note
+For published backtests or multi-machine work:
 
-Every Parquet file's `pitds.ingestion_date` Parquet metadata records the snapshot vintage. If you need bit-identical reproducibility for a published backtest, snapshot `data/processed/` to a versioned location (S3, DVC, git LFS) at the time of the run. Consumers can then point `PITDS_DATA_DIR` at the snapshot.
+```bash
+# After a successful update on the canonical install:
+aws s3 sync data/processed/ s3://your-bucket/pitds/$(date +%Y-%m-%d)/
+
+# Each consumer (different machine, CI, etc.) pulls a specific vintage:
+aws s3 sync s3://your-bucket/pitds/2026-04-30/ /tmp/pitds-data/
+export PITDS_DATA_DIR=/tmp/pitds-data
+```
+
+The `pitds.ingestion_date` Parquet metadata in each file records which vintage you're using; `pitds info` displays it. Snapshot whenever you want a stable point of reference.
+
+### Three rules to remember
+
+1. **Only the canonical install runs `pitds update-daily`.** The launchd agent handles this. Consumers should never run backfills, or they'll write conflicting data.
+2. **`PITDS_DATA_DIR` is how everyone shares the data.** It's the only required env var in a read-only consumer's `.env`.
+3. **For published-backtest reproducibility**, snapshot `data/processed/` to S3 / DVC / git LFS at the time of the run, and pin consumers to that snapshot path.
 
 ## Architecture
 
