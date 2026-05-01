@@ -1,0 +1,76 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  PITDS daily update launchd agent.
+
+  Install:
+    cp scripts/com.pitds.update-daily.plist ~/Library/LaunchAgents/
+    launchctl load ~/Library/LaunchAgents/com.pitds.update-daily.plist
+
+  Verify it's loaded:
+    launchctl list | grep com.pitds.update-daily
+
+  Run it once on demand (for testing):
+    launchctl start com.pitds.update-daily
+
+  Uninstall:
+    launchctl unload ~/Library/LaunchAgents/com.pitds.update-daily.plist
+    rm ~/Library/LaunchAgents/com.pitds.update-daily.plist
+
+  Schedule: weekdays (Mon-Fri = 1-5 in launchd) at 17:30 local time
+  (5:30 PM ET if the Mac is in Eastern). launchd uses LOCAL time, so no UTC conversion needed
+  as long as the machine timezone is America/New_York.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.pitds.update-daily</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/mharutyunyan/Projects/Enso/PITDS/scripts/run-update-daily.sh</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/mharutyunyan/Projects/Enso/PITDS</string>
+
+  <key>StartCalendarInterval</key>
+  <array>
+    <dict>
+      <key>Weekday</key><integer>1</integer>
+      <key>Hour</key><integer>17</integer>
+      <key>Minute</key><integer>30</integer>
+    </dict>
+    <dict>
+      <key>Weekday</key><integer>2</integer>
+      <key>Hour</key><integer>17</integer>
+      <key>Minute</key><integer>30</integer>
+    </dict>
+    <dict>
+      <key>Weekday</key><integer>3</integer>
+      <key>Hour</key><integer>17</integer>
+      <key>Minute</key><integer>30</integer>
+    </dict>
+    <dict>
+      <key>Weekday</key><integer>4</integer>
+      <key>Hour</key><integer>17</integer>
+      <key>Minute</key><integer>30</integer>
+    </dict>
+    <dict>
+      <key>Weekday</key><integer>5</integer>
+      <key>Hour</key><integer>17</integer>
+      <key>Minute</key><integer>30</integer>
+    </dict>
+  </array>
+
+  <key>StandardOutPath</key>
+  <string>/Users/mharutyunyan/Projects/Enso/PITDS/data/raw/launchd_stdout.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>/Users/mharutyunyan/Projects/Enso/PITDS/data/raw/launchd_stderr.log</string>
+
+  <!-- Don't run if Mac was asleep; just wait for the next scheduled time. -->
+  <key>RunAtLoad</key>
+  <false/>
+</dict>
+</plist>
