@@ -105,7 +105,7 @@ source .venv/bin/activate
 pip install -e /Users/mharutyunyan/Projects/Enso/PITDS
 
 # Or directly from a private GitHub repo (after pushing):
-pip install git+ssh://git@github.com/mharu997/PITDS.git@main
+pip install git+ssh://git@github.com/mharu997/crispy-waffle.git@main
 ```
 
 Then in your project's code:
