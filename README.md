@@ -104,8 +104,9 @@ cd /path/to/your/other-project
 source .venv/bin/activate
 pip install -e /Users/mharutyunyan/Projects/Enso/PITDS
 
-# Or directly from a private GitHub repo (after pushing):
-pip install git+ssh://git@github.com/mharu997/crispy-waffle.git@main
+# Or directly from the private GitHub repo (works from any machine with
+# gh CLI auth or a Personal Access Token in the URL):
+pip install git+https://github.com/mharu997/crispy-waffle.git@main
 ```
 
 Then in your project's code:
