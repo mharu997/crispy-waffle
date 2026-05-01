@@ -121,74 +121,91 @@ def latest_reported_fact(
     cik: str,
     field_name: str,
     as_of: dt.date,
-    max_lookback_days: int = 365,
+    max_lookback_days: int = 540,
     vintage: VintageMode = "latest_known",
     period_kind: Literal["quarterly", "ytd", "annual", "any"] = "quarterly",
 ) -> pd.DataFrame:
     """Return the most recent fact for *field_name* knowable on *as_of*.
 
-    Walks back through period_end candidates and returns the most recent
-    matching observation. Use ``period_kind`` to disambiguate XBRL's
-    overlapping period reports for the same period_end:
+    Single SQL query against the fundamentals partition tree, filtered by:
 
-    * ``quarterly`` (default) — period_start ≈ period_end - 90d (a single
-      fiscal quarter, e.g. Q2 revenue alone).
-    * ``ytd`` — period_start aligned with fiscal year start (e.g. H1 = Q1+Q2).
-    * ``annual`` — period_start ≈ period_end - 365d (full fiscal year).
-    * ``any`` — return whatever XBRL has, no period-length filter (legacy
-      behavior; may pick YTD when you wanted Q-only).
+    * ``filed <= as_of`` (PIT cutoff)
+    * any of *field_name*'s candidate XBRL concepts (concept aliasing)
+    * ``period_end <= as_of`` and within max_lookback_days
+    * period span matching *period_kind*
 
-    For instantaneous facts (balance sheet items: total_assets,
-    shares_outstanding, etc.) period_start is NULL; we handle this
-    correctly regardless of period_kind.
+    Use ``period_kind`` to disambiguate XBRL's overlapping period reports
+    for the same period_end:
+
+    * ``quarterly`` (default) — 80-100 day period (one fiscal quarter).
+    * ``ytd`` — < 80d or between 100-350d (cumulative since FY start).
+    * ``annual`` — 350-380 day period (full fiscal year).
+    * ``any`` — no period-length filter; takes whatever XBRL has.
+
+    Instantaneous facts (balance sheet: total_assets, shares_outstanding,
+    cash, total_equity) have period_start = NULL and are returned regardless
+    of period_kind.
     """
+    import duckdb
+
+    from ..fundamentals import concepts as concepts_module
+    from ..store import writer as _writer
+
     cik = str(cik).zfill(10)
-    candidates: list[dt.date] = []
-    cursor = as_of
-    while (as_of - cursor).days <= max_lookback_days:
-        candidates.append(cursor)
-        cursor -= dt.timedelta(days=15)  # finer step → finds quarter ends reliably
+    facts_dir = _writer.fundamentals_facts_dir()
+    glob = str(facts_dir / "**" / "*.parquet")
+    candidate_concepts = concepts_module.concepts_for(field_name)
+    concept_in = ",".join(f"'{c}'" for c in candidate_concepts)
+    earliest_period = (as_of - dt.timedelta(days=max_lookback_days)).isoformat()
 
-    # Period-length window for filtering (in days):
-    # quarterly: 80-100d, annual: 350-380d, ytd: anything else.
-    def _is_right_period(start, end) -> bool:
-        # Instantaneous facts have NULL period_start (pandas: NaT or None).
-        # For balance-sheet items (total_assets, shares_outstanding, etc.)
-        # this is the correct shape regardless of period_kind.
-        if start is None or pd.isna(start):
-            return True
-        # Convert pandas Timestamp to date if needed
-        if hasattr(start, "date") and callable(start.date):
-            start = start.date()
-        if hasattr(end, "date") and callable(end.date):
-            end = end.date()
-        days = (end - start).days
-        if period_kind == "quarterly":
-            return 80 <= days <= 100
-        if period_kind == "annual":
-            return 350 <= days <= 380
-        if period_kind == "ytd":
-            return days < 80 or 100 < days < 350
-        return True  # 'any'
+    if period_kind == "quarterly":
+        span_clause = (
+            "AND period_start IS NOT NULL "
+            "AND date_diff('day', period_start, period_end) BETWEEN 80 AND 100"
+        )
+    elif period_kind == "annual":
+        span_clause = (
+            "AND period_start IS NOT NULL "
+            "AND date_diff('day', period_start, period_end) BETWEEN 350 AND 380"
+        )
+    elif period_kind == "ytd":
+        span_clause = (
+            "AND period_start IS NOT NULL "
+            "AND (date_diff('day', period_start, period_end) < 80 "
+            "     OR date_diff('day', period_start, period_end) BETWEEN 100 AND 350)"
+        )
+    else:  # 'any'
+        span_clause = ""
 
-    for period_end in candidates:
-        df = _api.fact(
-            cik=cik, field_name=field_name,
-            period_end=period_end, as_of=as_of, vintage=vintage,
-        )
-        if df.empty:
-            continue
-        if period_kind == "any":
-            return df
-        # Filter rows whose (period_start, period_end) span matches kind
-        mask = df.apply(
-            lambda r: _is_right_period(r["period_start"], r["period_end"]),
-            axis=1,
-        )
-        filtered = df[mask]
-        if not filtered.empty:
-            return filtered
-    return pd.DataFrame()
+    # For balance-sheet items the natural span is "instantaneous"
+    # (period_start IS NULL). Always include those as a safety net so
+    # total_assets / shares_outstanding work without explicit period_kind.
+    instant_or_span = (
+        f"((period_start IS NULL) OR (period_start IS NOT NULL {span_clause}))"
+        if span_clause else "TRUE"
+    )
+
+    order = "DESC" if vintage == "latest_known" else "ASC"
+
+    sql = f"""
+    SELECT * FROM read_parquet({glob!r}, hive_partitioning=true)
+    WHERE cik = '{cik}'
+      AND concept IN ({concept_in})
+      AND filed <= DATE '{as_of.isoformat()}'
+      AND period_end <= DATE '{as_of.isoformat()}'
+      AND period_end >= DATE '{earliest_period}'
+      AND {instant_or_span}
+    QUALIFY ROW_NUMBER() OVER (
+        PARTITION BY cik, concept, period_start, period_end
+        ORDER BY filed {order}
+    ) = 1
+    ORDER BY period_end DESC, concept
+    LIMIT 1
+    """
+    con = duckdb.connect()
+    df = con.sql(sql).df()
+    con.close()
+    return df
 
 
 # ─────────────────────────────────────────────────────────────────────────────
