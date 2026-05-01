@@ -94,9 +94,65 @@ pitds update-daily            # nightly orchestrator (cron-friendly)
 pitds retry-failed-prices     # recover tickers that hit dot/rate-limit issues
 ```
 
+## Using PITDS from another project
+
+PITDS is a regular pip-installable Python package. To consume it from a sibling project (`AITrade`, `KalshiProject`, etc.) on the same machine:
+
+```bash
+# In the consuming project's venv:
+cd /path/to/your/other-project
+source .venv/bin/activate
+pip install -e /Users/mharutyunyan/Projects/Enso/PITDS
+
+# Or directly from a private GitHub repo (after pushing):
+pip install git+ssh://git@github.com/mharu997/PITDS.git@main
+```
+
+Then in your project's code:
+
+```python
+from pitds.pit import api
+from datetime import date
+
+universe = api.constituents(as_of=date(2024, 6, 28))
+prices   = api.prices(as_of=date(2024, 6, 28), ticker='AAPL', adjust='split_div')
+revenue  = api.fact(cik='0000320193', field_name='revenue',
+                    period_end=date(2024, 3, 30),
+                    as_of=date(2024, 6, 28))
+```
+
+### Sharing the dataset across projects
+
+The Parquet files (~150 MB) live in `data/processed/` of the canonical PITDS clone. Other projects should **point to the same data directory** instead of re-downloading. Two ways:
+
+**Option A — environment variable** (recommended; non-invasive):
+
+In the consuming project's `.env`:
+```
+PITDS_DATA_DIR=/Users/mharutyunyan/Projects/Enso/PITDS/data
+SEC_USER_AGENT="Your Name your.email@example.com"
+TIINGO_API_KEY=...
+```
+
+`pitds.config` reads `PITDS_DATA_DIR` and resolves all table paths from there.
+
+**Option B — programmatic override**:
+
+```python
+import os
+os.environ["PITDS_DATA_DIR"] = "/Users/mharutyunyan/Projects/Enso/PITDS/data"
+from pitds.pit import api          # imports re-read settings
+```
+
+The consuming project gets read-only access to whatever the canonical PITDS install has backfilled. Run `pitds update-daily` only from the canonical install (the launchd agent handles this); consumers are pure readers.
+
+### Reproducibility note
+
+Every Parquet file's `pitds.ingestion_date` Parquet metadata records the snapshot vintage. If you need bit-identical reproducibility for a published backtest, snapshot `data/processed/` to a versioned location (S3, DVC, git LFS) at the time of the run. Consumers can then point `PITDS_DATA_DIR` at the snapshot.
+
 ## Architecture
 
-See the implementation plan at `~/.claude/plans/i-want-to-put-fluffy-lovelace.md` and the code under `src/pitds/`.
+See `DESIGN.md` for the comprehensive operational doc, or the implementation plan at `~/.claude/plans/i-want-to-put-fluffy-lovelace.md`.
 
 Storage: Parquet files under `data/processed/`, queried via DuckDB. CIK is the canonical join key.
 
