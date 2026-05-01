@@ -64,15 +64,36 @@ def constituents(as_of: dt.date, *, announce_aware: bool = False) -> pd.DataFram
         con.close()
         return pd.DataFrame(columns=["ticker", "cik", "figi"])
 
-    df = con.sql(
-        f"""
-        SELECT ticker, cik, figi
-        FROM read_parquet({str(path)!r})
-        WHERE date = DATE '{effective_date.isoformat()}'
-          AND announced_only = FALSE
-        ORDER BY ticker
-        """
-    ).df()
+    # Join ticker_history at read time to populate CIK; constituents_daily
+    # itself has CIK as nullable and unpopulated by the materializer.
+    th_path = writer.ticker_history_path()
+    if th_path.exists():
+        df = con.sql(
+            f"""
+            SELECT
+                c.ticker,
+                COALESCE(c.cik, th.cik) AS cik,
+                c.figi
+            FROM read_parquet({str(path)!r}) c
+            LEFT JOIN read_parquet({str(th_path)!r}) th
+                   ON th.ticker = c.ticker
+                  AND th.valid_from <= c.date
+                  AND (th.valid_to IS NULL OR th.valid_to > c.date)
+            WHERE c.date = DATE '{effective_date.isoformat()}'
+              AND c.announced_only = FALSE
+            ORDER BY c.ticker
+            """
+        ).df()
+    else:
+        df = con.sql(
+            f"""
+            SELECT ticker, cik, figi
+            FROM read_parquet({str(path)!r})
+            WHERE date = DATE '{effective_date.isoformat()}'
+              AND announced_only = FALSE
+            ORDER BY ticker
+            """
+        ).df()
     con.close()
     return df
 

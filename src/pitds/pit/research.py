@@ -123,32 +123,71 @@ def latest_reported_fact(
     as_of: dt.date,
     max_lookback_days: int = 365,
     vintage: VintageMode = "latest_known",
+    period_kind: Literal["quarterly", "ytd", "annual", "any"] = "quarterly",
 ) -> pd.DataFrame:
-    """Return the most recent (period_end <= as_of) fact for *field_name*.
+    """Return the most recent fact for *field_name* knowable on *as_of*.
 
-    Handles the reporting-lag problem: you ask for "the latest revenue
-    knowable on 2024-06-28," and we walk back through period_end candidates
-    to find one whose filing was made on or before 2024-06-28.
+    Walks back through period_end candidates and returns the most recent
+    matching observation. Use ``period_kind`` to disambiguate XBRL's
+    overlapping period reports for the same period_end:
 
-    Set ``vintage='first_reported'`` for "as originally reported" semantics
-    (use this when you want zero look-ahead from restatements).
+    * ``quarterly`` (default) — period_start ≈ period_end - 90d (a single
+      fiscal quarter, e.g. Q2 revenue alone).
+    * ``ytd`` — period_start aligned with fiscal year start (e.g. H1 = Q1+Q2).
+    * ``annual`` — period_start ≈ period_end - 365d (full fiscal year).
+    * ``any`` — return whatever XBRL has, no period-length filter (legacy
+      behavior; may pick YTD when you wanted Q-only).
+
+    For instantaneous facts (balance sheet items: total_assets,
+    shares_outstanding, etc.) period_start is NULL; we handle this
+    correctly regardless of period_kind.
     """
     cik = str(cik).zfill(10)
-    # Walk back at most max_lookback_days; for canonical periods we expect
-    # quarter ends so we sample a few likely period_ends.
     candidates: list[dt.date] = []
     cursor = as_of
     while (as_of - cursor).days <= max_lookback_days:
         candidates.append(cursor)
-        cursor -= dt.timedelta(days=30)
+        cursor -= dt.timedelta(days=15)  # finer step → finds quarter ends reliably
+
+    # Period-length window for filtering (in days):
+    # quarterly: 80-100d, annual: 350-380d, ytd: anything else.
+    def _is_right_period(start, end) -> bool:
+        # Instantaneous facts have NULL period_start (pandas: NaT or None).
+        # For balance-sheet items (total_assets, shares_outstanding, etc.)
+        # this is the correct shape regardless of period_kind.
+        if start is None or pd.isna(start):
+            return True
+        # Convert pandas Timestamp to date if needed
+        if hasattr(start, "date") and callable(start.date):
+            start = start.date()
+        if hasattr(end, "date") and callable(end.date):
+            end = end.date()
+        days = (end - start).days
+        if period_kind == "quarterly":
+            return 80 <= days <= 100
+        if period_kind == "annual":
+            return 350 <= days <= 380
+        if period_kind == "ytd":
+            return days < 80 or 100 < days < 350
+        return True  # 'any'
 
     for period_end in candidates:
         df = _api.fact(
             cik=cik, field_name=field_name,
             period_end=period_end, as_of=as_of, vintage=vintage,
         )
-        if not df.empty:
+        if df.empty:
+            continue
+        if period_kind == "any":
             return df
+        # Filter rows whose (period_start, period_end) span matches kind
+        mask = df.apply(
+            lambda r: _is_right_period(r["period_start"], r["period_end"]),
+            axis=1,
+        )
+        filtered = df[mask]
+        if not filtered.empty:
+            return filtered
     return pd.DataFrame()
 
 
