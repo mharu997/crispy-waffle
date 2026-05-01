@@ -606,7 +606,193 @@ Plan file: `~/.claude/plans/i-want-to-put-fluffy-lovelace.md` (the original arch
 
 ---
 
-## 14. Why this matters
+## 14. Research patterns — train/test on PIT data without leaking
+
+PITDS lets you train on 2010-2022 and test on 2023-today **survivorship-bias-free**, but only if your code follows five rules. Get any wrong and the model silently sees the future.
+
+### The five rules (in order of how often researchers get them wrong)
+
+#### Rule 1 — Universe membership uses per-sample `as_of`, never today
+
+```python
+# WRONG — leaks today's universe into 2018 training samples
+universe_today = api.constituents(as_of=date.today())
+for t in training_dates:
+    for cik in universe_today['cik']:        # ← survivorship bias
+        features = compute_features(cik, t)
+
+# RIGHT — universe is whatever was in the index on each sample's date
+for t in training_dates:
+    universe_t = api.constituents(as_of=t)   # ← rebuilds at each t
+    for cik in universe_t['cik']:
+        features = compute_features(cik, t)
+```
+
+#### Rule 2 — Feature lookback windows must end strictly *at or before* the prediction date
+
+```python
+# WRONG — momentum_12m at t includes price ON t (the label horizon)
+hist = api.price_history(cik=cik, end=t + timedelta(days=21))   # leaks
+mom_12m = hist['close_adj'].iloc[-1] / hist['close_adj'].iloc[-252] - 1
+
+# RIGHT — end=t means the most recent included row is t's close
+hist = api.price_history(cik=cik, end=t)
+mom_12m = hist['close_adj'].iloc[-1] / hist['close_adj'].iloc[-252] - 1
+```
+
+The `end` parameter in `api.price_history` is *inclusive* — `end=date(2018,3,15)` returns prices through 2018-03-15 close. That's the most recent observation knowable to a trader making a decision before market open on 2018-03-16.
+
+#### Rule 3 — Fundamentals must use `as_of=t` for each sample, not today
+
+This is the subtlest bug. If you pull fundamentals with `as_of=date.today()` for every training sample, you've leaked **restatements**: a 2018 sample sees 2018 financials as restated in 2024.
+
+```python
+# WRONG — restatement leak
+for t in training_dates:
+    rev = api.fact(cik=cik, field_name='revenue',
+                   period_end=last_fye_before(t),
+                   as_of=date.today())          # ← restatements leak
+
+# RIGHT — only data filed by t is visible
+for t in training_dates:
+    rev = api.fact(cik=cik, field_name='revenue',
+                   period_end=last_fye_before(t),
+                   as_of=t)                     # ← PIT-correct
+```
+
+If you want **zero restatement leak** even within `as_of=t`, use `vintage='first_reported'` to take the original filed value rather than the latest-as-of-t restatement.
+
+#### Rule 4 — Be consistent about vintage between training and deployment
+
+Pick `latest_known` or `first_reported` and use the same vintage for training samples and live inference. Mixing them creates a distribution shift between train and prod.
+
+- **`latest_known`** (default): the best-knowledge-as-of-t value, including any restatements filed by t. Most factor research uses this.
+- **`first_reported`**: the value filed in the first 10-Q/10-K covering this period. Closer to what a live trader would have seen on the announcement day. Lower-noise; misses information that arrives later.
+
+#### Rule 5 — Respect reporting lag
+
+For a sample on 2018-04-15, you cannot use FY2017 financials filed in 10-K on 2018-02-01 (visible) AND FY2018-Q1 financials filed on 2018-05-03 (NOT yet visible). PITDS handles this if you pass `as_of=t`, but you must trust the answer:
+
+```python
+rev_q1 = api.fact(cik=X, field_name='revenue',
+                  period_end=date(2018,3,31),
+                  as_of=date(2018,4,15))
+# rev_q1 is EMPTY — Q1 2018 10-Q wasn't filed until May 2018.
+```
+
+Code defensively: if `api.fact` returns empty, fall back to the most recent reported quarter, or skip the sample. The `pitds.pit.research.latest_reported_fact()` helper does this walking automatically.
+
+### Canonical training/test split pattern
+
+```python
+from pitds.pit import api
+from pitds.pit.research import (
+    is_scoreable, filter_universe, latest_reported_fact, walk_forward_splits,
+)
+from datetime import date, timedelta
+import numpy as np
+
+VINTAGE = 'latest_known'   # or 'first_reported' — pick one and stick to it
+
+def features_at(cik, t):
+    """PIT-correct feature row for (cik, t)."""
+    hist = api.price_history(cik=cik, end=t, adjust='split_div')
+    if len(hist) < 252:
+        return None
+    mom_12m = hist['close_adj'].iloc[-21] / hist['close_adj'].iloc[-252] - 1
+
+    rev = latest_reported_fact(cik=cik, field_name='revenue',
+                               as_of=t, vintage=VINTAGE)
+    ni  = latest_reported_fact(cik=cik, field_name='net_income',
+                               as_of=t, vintage=VINTAGE)
+    if rev.empty or ni.empty:
+        return None
+
+    return {
+        'cik': cik, 'date': t,
+        'mom_12m': mom_12m,
+        'log_revenue': float(np.log(rev['val'].iloc[0])),
+        'profit_margin': float(ni['val'].iloc[0] / rev['val'].iloc[0]),
+    }
+
+
+def label_at(cik, t, horizon_days=21):
+    """Forward 1-month return as label."""
+    fwd = api.price_history(cik=cik, start=t,
+                            end=t + timedelta(days=horizon_days*2),
+                            adjust='split_div')
+    if len(fwd) < horizon_days:
+        return None
+    return float(fwd['close_adj'].iloc[horizon_days-1] / fwd['close_adj'].iloc[0] - 1)
+
+
+# Walk-forward splits — train on rolling 5y, test on next 6mo, step 6mo
+folds = walk_forward_splits(
+    start=date(2010,1,1), end=date.today(),
+    train_years=5, test_months=6, step_months=6,
+)
+
+for fold in folds:
+    train_rows = []
+    for t in trading_days_between(fold.train_start, fold.train_end):
+        for cik in filter_universe(as_of=t, min_history_days=252):
+            f = features_at(cik, t)
+            y = label_at(cik, t)
+            if f and y is not None:
+                train_rows.append({**f, 'y': y})
+
+    test_rows = []
+    for t in trading_days_between(fold.test_start, fold.test_end):
+        for cik in filter_universe(as_of=t):
+            f = features_at(cik, t)
+            y = label_at(cik, t)            # for evaluation only; model never sees y
+            if f and y is not None:
+                test_rows.append({**f, 'y': y})
+
+    # Train your model on train_rows, evaluate on test_rows
+    model.fit(train_rows)
+    score = model.evaluate(test_rows)
+```
+
+Three properties this code guarantees:
+
+- Universe at every t is the *historical* S&P 500, not today's
+- All features at t use only data knowable on t (prices ≤ t close, fundamentals filed ≤ t)
+- Restatements made *after* t never leak into a t-sample's features
+
+### Inference-time deployment
+
+The same `features_at()` and `is_scoreable()` work unchanged at inference — pass `as_of=date.today()` and you get a live prediction with no train/serve skew.
+
+```python
+from pitds.pit.research import is_scoreable, filter_universe
+
+today = date.today()
+predictions = {}
+for cik in filter_universe(as_of=today, min_history_days=252):
+    score = is_scoreable(cik, as_of=today)
+    if not score.ok:
+        log.info(f"skip {cik}: {score.reason}")
+        continue
+    f = features_at(cik, today)
+    if f is None:
+        continue
+    predictions[cik] = model.predict(f)
+
+# Pass `predictions` to your order routing layer.
+```
+
+### Common gotchas catalog
+
+- **Pre-IPO data leak**: yfinance occasionally returns placeholder prices before a stock's actual first trading day. `is_scoreable` catches this via `min_history_days`.
+- **Ticker rename inside training window**: handled automatically — CIK is stable, just join on CIK.
+- **Mid-period sector reclass**: `api.sector(cik, as_of=t)` returns the sector that applied on t. Phase B refinement: Wikipedia revision history; for now, sector_history has only the current snapshot per CIK.
+- **Splits inside the test window**: `adjust='split_div'` handles split-adjustment correctly using only actions with `ex_date <= t` for sample at t.
+- **Constituent change announce vs effective**: the default API uses `effective_date`. To trade the announcement effect, pass `announce_aware=True` to `api.constituents`.
+
+---
+
+## 15. Why this matters
 
 A correctly-built PIT dataset is the foundation of any honest quantitative research. Without it:
 
