@@ -52,6 +52,10 @@ class Settings(BaseSettings):
     def fundamentals_dir(self) -> Path:
         return self.processed_dir / "fundamentals_facts"
 
+    @property
+    def news_dir(self) -> Path:
+        return self.processed_dir / "news"
+
     def require_tiingo(self) -> str:
         if not self.tiingo_api_key:
             raise RuntimeError(
@@ -82,6 +86,7 @@ class Settings(BaseSettings):
             self.raw_dir / "edgar" / "submissions",
             self.processed_dir,
             self.fundamentals_dir,
+            self.news_dir,
         ):
             sub.mkdir(parents=True, exist_ok=True)
 

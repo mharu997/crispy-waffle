@@ -93,7 +93,13 @@ def upsert_single_file(
     """
     path = Path(path)
     if path.exists():
-        existing = pq.read_table(path)
+        # Use ParquetFile().read() rather than pq.read_table(), which
+        # auto-detects hive partitioning when the file lives in a
+        # ``key=value/`` directory and re-injects the partition column.
+        # That auto-injection causes a schema mismatch on every upsert
+        # of partitioned datasets (news, fundamentals_facts) because
+        # the caller has already dropped the partition column.
+        existing = pq.ParquetFile(path).read()
         if existing.schema.equals(new_rows.schema, check_metadata=False):
             combined = pa.concat_tables([existing, new_rows])
         else:
@@ -145,6 +151,16 @@ def upsert_single_file(
     ).fetch_arrow_table()
     con.close()
 
+    # DuckDB normalizes timezone-aware timestamps to the local system tz
+    # ("America/New_York") which silently drifts the canonical schema
+    # (e.g. NEWS declares tz=UTC). Cast back to the input schema to preserve
+    # the canonical timezone — the absolute instant is unchanged.
+    if not deduped.schema.equals(new_rows.schema, check_metadata=False):
+        try:
+            deduped = deduped.cast(new_rows.schema)
+        except Exception as e:
+            log.warning("Could not cast deduped back to canonical schema: %s", e)
+
     return write_parquet(deduped, path, extra_metadata=extra_metadata)
 
 
@@ -153,13 +169,20 @@ def append_to_partition(
     base_dir: Path,
     *,
     partition_col: str,
+    primary_key: list[str],
     extra_metadata: dict[str, str] | None = None,
 ) -> list[Path]:
     """Append *new_rows* into hive partitions under *base_dir*.
 
-    Used for ``fundamentals_facts``, partitioned by ``year(filed)``.
-    Within each partition we still upsert by primary key (to absorb
-    re-fetches of the same accession).
+    Generic over (partition_col, primary_key). Used for
+    ``fundamentals_facts`` (partition by year(filed), PK = SEC composite)
+    and ``news`` (partition by year(crawl_date), PK = article_id).
+    Within each partition we still upsert by primary key, so re-fetches
+    are absorbed without duplicating rows.
+
+    Columns named in *primary_key* that do not exist in *new_rows* are
+    silently dropped from the dedup key, mirroring the schema-tolerant
+    upsert behavior.
     """
     base_dir = Path(base_dir)
     base_dir.mkdir(parents=True, exist_ok=True)
@@ -181,18 +204,10 @@ def append_to_partition(
         # column on read.
         if partition_col in partition_rows.column_names:
             partition_rows = partition_rows.drop([partition_col])
-        # For fundamentals_facts the natural primary key is the SEC composite.
-        pk = [
-            "cik",
-            "concept",
-            "period_start",
-            "period_end",
-            "accession_number",
-        ]
         upsert_single_file(
             partition_rows,
             partition_path,
-            primary_key=[c for c in pk if c in partition_rows.column_names],
+            primary_key=[c for c in primary_key if c in partition_rows.column_names],
             extra_metadata=extra_metadata,
         )
         written.append(partition_path)
@@ -215,6 +230,10 @@ def prices_path() -> Path:
 
 def fundamentals_facts_dir() -> Path:
     return settings.fundamentals_dir
+
+
+def news_dir() -> Path:
+    return settings.news_dir
 
 
 def sector_history_path() -> Path:

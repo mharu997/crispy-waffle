@@ -235,6 +235,51 @@ TICKER_HISTORY = pa.schema(
 
 
 # ---------------------------------------------------------------------------
+# News — partitioned by year(crawl_date)
+# ---------------------------------------------------------------------------
+
+# News articles from Tiingo's News REST endpoint. Append-only, deduplicated
+# by Tiingo's stable ``article_id``. The PIT contract uses ``crawl_date``
+# (when Tiingo's crawler first indexed the article) as the as-of gate, NOT
+# ``published_date`` — Tiingo backfills historical articles when adding new
+# sources, and those articles' published_date can predate when we (or anyone
+# else) could have known about them. Sorting by published_date in a backtest
+# is a silent look-ahead leak; queries should filter ``crawl_date <= as_of``.
+#
+# tickers and tags are stored as ``list<string>`` rather than exploded into
+# (article, ticker) rows. DuckDB queries use ``list_contains(tickers, 'AAPL')``
+# at read time. CIK is NOT resolved at write time because (a) Tiingo only
+# provides tickers, (b) ticker→CIK is itself point-in-time, so resolution
+# happens in the read API against ticker_history.
+
+NEWS = pa.schema(
+    [
+        # Tiingo's stable unique article ID. Primary dedup key.
+        pa.field("article_id", pa.int64(), nullable=False),
+        pa.field("title", pa.string(), nullable=False),
+        # Some articles are headline-only (no body summary).
+        pa.field("description", pa.string(), nullable=True),
+        pa.field("url", pa.string(), nullable=False),
+        # News source domain, e.g. "reuters.com", "bloomberg.com".
+        pa.field("source", pa.string(), nullable=False),
+        # Source-claimed publish time. UTC.
+        pa.field("published_date", pa.timestamp("us", tz="UTC"), nullable=False),
+        # When Tiingo first indexed the article. THE PIT GATE. UTC.
+        pa.field("crawl_date", pa.timestamp("us", tz="UTC"), nullable=False),
+        # Tiingo's tagged tickers (raw, no CIK resolution at write time).
+        # Use child name 'element' to match parquet's wire convention so
+        # the schema round-trips through disk without an "item" vs "element"
+        # mismatch on subsequent reads.
+        pa.field("tickers", pa.list_(pa.field("element", pa.string())), nullable=True),
+        pa.field("tags", pa.list_(pa.field("element", pa.string())), nullable=True),
+        # Provenance, e.g. "tiingo_news". Mirrors the `source` column on prices.
+        pa.field("ingested_via", pa.string(), nullable=False),
+        pa.field("ingestion_date", DATE, nullable=False),
+    ]
+)
+
+
+# ---------------------------------------------------------------------------
 # Schema registry
 # ---------------------------------------------------------------------------
 
@@ -246,6 +291,7 @@ SCHEMAS: dict[str, pa.Schema] = {
     "sector_history": SECTOR_HISTORY,
     "corporate_actions": CORPORATE_ACTIONS,
     "ticker_history": TICKER_HISTORY,
+    "news": NEWS,
 }
 
 

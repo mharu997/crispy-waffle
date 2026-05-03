@@ -792,6 +792,79 @@ for cik in filter_universe(as_of=today, min_history_days=252):
 
 ---
 
+## 16. News (point-in-time)
+
+News is enriched on top of the four core PIT layers via Tiingo's News REST API. The schema and storage layout follow the same contract as fundamentals: every row carries an as-of timestamp (`crawl_date`) plus an `ingestion_date`, and queries filter `crawl_date <= as_of` to stay PIT-safe.
+
+### Layout
+
+```
+data/processed/news/
+  crawl_year=2021/data.parquet
+  crawl_year=2022/data.parquet
+  ...
+  crawl_year=2026/data.parquet
+```
+
+Hive-partitioned by `crawl_year` (year of `crawl_date`), mirroring `fundamentals_facts/`. Within each partition, rows are upserted on `article_id` (Tiingo's stable unique ID), keeping the latest `ingestion_date` on duplicates.
+
+### Schema (`schemas.NEWS`)
+
+| Column | Type | PIT role |
+|---|---|---|
+| `article_id` | int64 | dedup key |
+| `title` | string | — |
+| `description` | string (nullable) | — |
+| `url` | string | — |
+| `source` | string | news domain (e.g. `reuters.com`) |
+| `published_date` | timestamp[us, UTC] | source-claimed publish time |
+| `crawl_date` | timestamp[us, UTC] | **the PIT gate** — when Tiingo first indexed |
+| `tickers` | list<string> (nullable) | Tiingo's tagged tickers (raw, not CIK-resolved) |
+| `tags` | list<string> (nullable) | Tiingo's topic tags |
+| `ingested_via` | string | `"tiingo_news"` |
+| `ingestion_date` | date | when *we* pulled it |
+
+### The `crawl_date` vs `published_date` trap
+
+Tiingo backfills historical articles when adding new news sources to its crawl. For those articles, `published_date` (what the source claims) can be *years* earlier than `crawl_date` (when Tiingo first knew about them). A backtest that filters by `published_date <= as_of` will silently include articles nobody could have seen on that date — a classic look-ahead leak.
+
+PITDS treats `crawl_date` as the authoritative as-of gate. The (deferred) `pit.api.news` and `pit.research.news_for` helpers will default to `vintage="crawl_known"` filtering on `crawl_date`. A `vintage="published_truth"` mode will be available for non-backtest use cases (e.g., narrative analysis), explicitly marked NOT PIT-safe.
+
+### Backfill
+
+```bash
+# Current S&P 500 constituents for the last 5 years
+pitds backfill-news --start 2021-01-01 --end today --universe current
+
+# Full historical universe — includes delisted tickers, avoids survivorship
+pitds backfill-news --start 2021-01-01 --end today --universe all
+
+# Targeted (smoke test or recovery)
+pitds backfill-news --start 2025-04-01 --end 2025-04-07 --universe AAPL,MSFT,GOOGL
+```
+
+Tiingo accepts comma-separated multi-ticker queries, so the loader batches `--batch-size` (default 5) tickers per request, paginates by `offset`, and dedupes by `article_id` across batches. Per-batch failures are logged and the loop continues.
+
+### Tiingo date-filter caveat (observed)
+
+Tiingo's `startDate`/`endDate` query parameters are **not reliably enforced** when sorting by `crawlDate`:
+
+* The user's plan tier exposes a rolling history window (~6 months on Power, longer on Enterprise). Articles older than the tier window are inaccessible regardless of `startDate`.
+* When `sortBy=crawlDate` ascending, the API streams from "earliest available within tier" forward and may not honor the `endDate` upper bound.
+
+Practical effect: `pitds backfill-news --start 2010-01-01 --end 2010-12-31` does **not** return 2010 articles — it returns the earliest portion of whatever your tier exposes today. The loader observes this and emits an INFO log line per batch showing the actual `crawl_date` range returned, plus a WARNING when actual diverges from requested by more than 7 days. PIT correctness is unaffected because the as-of gate uses the recorded `crawl_date` per article, not the requested window.
+
+To pull pre-rolling-window history, an Enterprise plan with bulk-download access is required (institutional only).
+
+### Not in this layer (deferred)
+
+- `pit.api.news(as_of, ...)` read helper with CIK resolution via `ticker_history`.
+- `pit.research.news_for(cik, *, as_of, lookback_days)` research helper.
+- Daily refresh step in `update/daily.py`.
+- NLP-derived features (sentiment, embeddings) — these belong in a separate features layer keyed off the immutable raw `news/` parquet, not in the raw layer itself.
+
+---
+
 ## 15. Why this matters
 
 A correctly-built PIT dataset is the foundation of any honest quantitative research. Without it:
