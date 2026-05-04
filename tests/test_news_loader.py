@@ -12,7 +12,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
-from pitds.news import loader
+from pitds.news import loader, tiingo as tiingo_client
 from pitds.store import schemas
 
 
@@ -328,6 +328,30 @@ def test_warn_on_date_drift_warns_when_no_articles_returned(caplog):
         )
     msgs = [r.message for r in caplog.records]
     assert any("No articles returned" in m for m in msgs)
+
+
+def test_class_share_tickers_normalized_for_tiingo(monkeypatch):
+    """BRK.B / BF.B must be sent to Tiingo as brk-b / bf-b, not the dot form.
+
+    Tiingo (like yfinance and Stooq) expects class-share tickers in dash form.
+    We canonically store the dot form; the news client must normalize before
+    sending. Without this, BRK.B and BF.B silently return zero articles.
+    """
+    captured: dict = {}
+
+    class FakeResp:
+        status_code = 200
+        def raise_for_status(self): pass
+        def json(self): return []
+
+    def fake_get(url, *, headers, params, timeout):
+        captured.update(params)
+        return FakeResp()
+
+    monkeypatch.setattr(tiingo_client.httpx, "get", fake_get)
+    tiingo_client.fetch_news(tickers=["BRK.B", "BF.B", "AAPL"])
+
+    assert captured["tickers"] == "brk-b,bf-b,aapl"
 
 
 def test_schema_includes_required_pit_columns():

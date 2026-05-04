@@ -26,6 +26,7 @@ import httpx
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from ..config import settings
+from ..prices import symbols
 
 log = logging.getLogger(__name__)
 
@@ -73,7 +74,9 @@ def fetch_news(
         "sortBy": sort_by,
     }
     if tickers:
-        params["tickers"] = ",".join(t.lower() for t in tickers)
+        # Tiingo expects dash-form for class shares (BRK-B, not BRK.B).
+        # Reuse the prices-side normalizer so the rule lives in one place.
+        params["tickers"] = ",".join(symbols.for_tiingo(t).lower() for t in tickers)
     if tags:
         params["tags"] = ",".join(tags)
     if start_date is not None:
