@@ -380,7 +380,9 @@ def test_daily_step_news_calls_backfill_with_2_day_window(monkeypatch):
     run = daily.DailyRun()
     daily._step_news_yesterday(run)
 
-    assert (captured["end"] - captured["start"]).days == 2
+    # Window is 4 days — covers Friday→Monday weekend gap reliably.
+    # See docstring on _step_news_yesterday for the rationale.
+    assert (captured["end"] - captured["start"]).days == 4
     assert captured["end"] == dt.date.today()
     assert captured["batch_size"] == 5
     assert sorted(captured["tickers"]) == ["AAPL", "GOOGL", "MSFT"]

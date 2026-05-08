@@ -190,18 +190,27 @@ def _step_fundamentals_incremental(run: DailyRun) -> None:
 
 
 def _step_news_yesterday(run: DailyRun) -> None:
-    """Pull the last 2 days of Tiingo news for the historical S&P universe.
+    """Pull the last 4 days of Tiingo news for the historical S&P universe.
 
-    The 2-day window (start = today - 2 days) is the smallest interval that
-    survives Tiingo's continuous-crawler boundary effects: an article
-    published at 23:50 UTC may have a crawl_date of 00:05 UTC the next day,
-    so a strict 1-day pull would miss it on the day it was crawled. The
-    extra day overlap is absorbed by article_id dedup at write time.
+    The window must cover the worst-case gap between consecutive cron runs:
+
+    * **Weekday → next weekday**: ~24h gap, plus crawler boundary smear of
+      a few hours (an article published 23:50 UTC may have crawl_date
+      00:05 UTC the next day) → 2 days suffices.
+    * **Friday → Monday**: ~72h gap (3 days), so a 2-day window would
+      silently miss articles published Friday between cron-run-time
+      (17:30 ET) and end-of-day. A 4-day window covers Thursday-onwards
+      from Monday's run, absorbing the weekend reliably.
+    * **Holiday Monday → Tuesday**: 4-day window still covers Friday's
+      post-cron tail. Two consecutive holidays would need extending —
+      acceptable trade-off given how rare that is.
 
     Universe is "all" (historical) rather than "current" so that delisted
     tickers with rare news (e.g., bankruptcy proceedings for legacy names)
-    are still picked up. Cost stays bounded by the 2-day startDate filter,
-    which Tiingo honors for recent dates.
+    are still picked up. Cost stays bounded by the startDate filter, which
+    Tiingo honors for recent dates — the 4-day window pulls ~50-80
+    paginated requests per run, well under the daily budget. article_id
+    dedup at write time absorbs the redundancy from overlapping windows.
     """
     name = "news_yesterday"
     try:
@@ -210,7 +219,7 @@ def _step_news_yesterday(run: DailyRun) -> None:
         snap = fetch_snapshot()
         tickers = sorted(set(snap.ticker_tenures["ticker"].astype(str).str.upper()))
         end = dt.date.today()
-        start = end - dt.timedelta(days=2)
+        start = end - dt.timedelta(days=4)
         n = backfill(tickers, start=start, end=end, batch_size=5)
         run.add(name, True, f"backfilled [{start}, {end}]", rows=n)
     except Exception as e:
