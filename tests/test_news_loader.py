@@ -354,6 +354,58 @@ def test_class_share_tickers_normalized_for_tiingo(monkeypatch):
     assert captured["tickers"] == "brk-b,bf-b,aapl"
 
 
+def test_daily_step_news_calls_backfill_with_2_day_window(monkeypatch):
+    """The daily news step should request start = today - 2 days, end = today,
+    over the full historical universe."""
+    import pandas as pd
+    from pitds.update import daily
+    import pitds.news.loader as news_loader
+
+    fake_snap = type("Snap", (), {
+        "ticker_tenures": pd.DataFrame({"ticker": ["AAPL", "MSFT", "GOOGL"]}),
+    })()
+    monkeypatch.setattr(daily, "fetch_snapshot", lambda: fake_snap)
+
+    captured: dict = {}
+
+    def fake_backfill(tickers, *, start, end, batch_size):
+        captured["tickers"] = tickers
+        captured["start"] = start
+        captured["end"] = end
+        captured["batch_size"] = batch_size
+        return 1234
+
+    monkeypatch.setattr(news_loader, "backfill", fake_backfill)
+
+    run = daily.DailyRun()
+    daily._step_news_yesterday(run)
+
+    assert (captured["end"] - captured["start"]).days == 2
+    assert captured["end"] == dt.date.today()
+    assert captured["batch_size"] == 5
+    assert sorted(captured["tickers"]) == ["AAPL", "GOOGL", "MSFT"]
+    assert len(run.steps) == 1
+    assert run.steps[0].name == "news_yesterday"
+    assert run.steps[0].succeeded is True
+    assert run.steps[0].rows_written == 1234
+
+
+def test_daily_step_news_handles_exception(monkeypatch):
+    """If backfill raises, the step records failure but doesn't propagate."""
+    from pitds.update import daily
+
+    monkeypatch.setattr(
+        daily, "fetch_snapshot",
+        lambda: (_ for _ in ()).throw(RuntimeError("simulated snapshot failure")),
+    )
+
+    run = daily.DailyRun()
+    daily._step_news_yesterday(run)
+    assert len(run.steps) == 1
+    assert run.steps[0].succeeded is False
+    assert run.steps[0].error is not None
+
+
 def test_schema_includes_required_pit_columns():
     """Sanity: NEWS schema must carry the columns the read API will rely on."""
     cols = set(schemas.NEWS.names)

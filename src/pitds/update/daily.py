@@ -189,6 +189,34 @@ def _step_fundamentals_incremental(run: DailyRun) -> None:
         run.add(name, False, "exception", err=str(e))
 
 
+def _step_news_yesterday(run: DailyRun) -> None:
+    """Pull the last 2 days of Tiingo news for the historical S&P universe.
+
+    The 2-day window (start = today - 2 days) is the smallest interval that
+    survives Tiingo's continuous-crawler boundary effects: an article
+    published at 23:50 UTC may have a crawl_date of 00:05 UTC the next day,
+    so a strict 1-day pull would miss it on the day it was crawled. The
+    extra day overlap is absorbed by article_id dedup at write time.
+
+    Universe is "all" (historical) rather than "current" so that delisted
+    tickers with rare news (e.g., bankruptcy proceedings for legacy names)
+    are still picked up. Cost stays bounded by the 2-day startDate filter,
+    which Tiingo honors for recent dates.
+    """
+    name = "news_yesterday"
+    try:
+        from ..news.loader import backfill
+
+        snap = fetch_snapshot()
+        tickers = sorted(set(snap.ticker_tenures["ticker"].astype(str).str.upper()))
+        end = dt.date.today()
+        start = end - dt.timedelta(days=2)
+        n = backfill(tickers, start=start, end=end, batch_size=5)
+        run.add(name, True, f"backfilled [{start}, {end}]", rows=n)
+    except Exception as e:
+        run.add(name, False, "exception", err=traceback.format_exc().splitlines()[-1])
+
+
 def _step_verify(run: DailyRun) -> None:
     """Run the integrity check suite."""
     name = "verify"
@@ -212,6 +240,7 @@ STEPS = [
     _step_prices_yesterday,
     _step_corporate_actions_yesterday,
     _step_fundamentals_incremental,
+    _step_news_yesterday,
     _step_verify,
 ]
 
