@@ -52,6 +52,9 @@ pitds backfill-prices --universe all --start 2010-01-01
 pitds backfill-fundamentals --universe current
 pitds backfill-sectors
 
+# Phase D — news enrichment (Tiingo Power tier exposes ~3-6mo rolling window)
+pitds backfill-news --universe all --start 2010-01-01
+
 # Verify
 pitds verify
 pitds validate-fred --start 2018-01-01
@@ -91,6 +94,7 @@ pitds verify                  # 7 integrity + regression checks
 pitds validate-fred           # daily-return correlation vs FRED SP500
 pitds backtest-demo           # PIT-correct equal-weight backtest
 pitds update-daily            # nightly orchestrator (cron-friendly)
+pitds backfill-news           # Tiingo News for the historical universe
 pitds retry-failed-prices     # recover tickers that hit dot/rate-limit issues
 ```
 
@@ -229,6 +233,7 @@ Storage: Parquet files under `data/processed/`, queried via DuckDB. CIK is the c
 | Identifiers | OpenFIGI | EDGAR `company-tickers-exchange.json` |
 | Trading calendar | `pandas-market-calendars` NYSE | — |
 | Index validation | FRED `SP500` | — |
+| **News (PIT)** | **Tiingo News API** | — |
 
 ## Status
 
@@ -239,6 +244,7 @@ Storage: Parquet files under `data/processed/`, queried via DuckDB. CIK is the c
 - [x] Phase B: sectors (SIC from EDGAR + GICS crosswalk + Wikipedia-observed)
 - [x] Phase C: daily updater + 7-check integrity suite + 9 invariant tests
 - [x] FRED tracking validation (≥0.95 daily-return correlation)
+- [x] Phase D: news enrichment (Tiingo News API, hive-partitioned by `crawl_year`, daily refresh integrated 7-day/week, see `DESIGN.md` §16)
 
 ## Known limitations
 

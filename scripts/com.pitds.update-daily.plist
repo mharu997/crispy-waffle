@@ -17,9 +17,23 @@
     launchctl unload ~/Library/LaunchAgents/com.pitds.update-daily.plist
     rm ~/Library/LaunchAgents/com.pitds.update-daily.plist
 
-  Schedule: weekdays (Mon-Fri = 1-5 in launchd) at 17:30 local time
-  (5:30 PM ET if the Mac is in Eastern). launchd uses LOCAL time, so no UTC conversion needed
-  as long as the machine timezone is America/New_York.
+  Schedule: every day (7-day, including weekends) at 17:30 local time.
+  launchd weekday integers: 0/7=Sunday, 1=Monday, ..., 6=Saturday.
+
+  Why 7 days: news flows continuously over weekends (earnings preannouncements,
+  M&A rumors, geopolitical events). Without weekend runs there's a ~60-hour
+  gap from Friday's run to Monday's where weekend news isn't captured until
+  Monday — and any article published Friday after 17:30 ET would otherwise
+  fall outside Monday's startDate filter, getting permanently skipped.
+
+  Weekend cost is small: prices/corp-actions/fundamentals dedupe to no-ops
+  because there's no new market data; only the news step does meaningful
+  work, plus a few seconds for the constituents diff against Wikipedia.
+
+  After editing this file, reload the agent so launchd sees the new schedule:
+    launchctl unload ~/Library/LaunchAgents/com.pitds.update-daily.plist
+    cp scripts/com.pitds.update-daily.plist ~/Library/LaunchAgents/
+    launchctl load ~/Library/LaunchAgents/com.pitds.update-daily.plist
 -->
 <plist version="1.0">
 <dict>
@@ -36,6 +50,11 @@
 
   <key>StartCalendarInterval</key>
   <array>
+    <dict>
+      <key>Weekday</key><integer>0</integer>
+      <key>Hour</key><integer>17</integer>
+      <key>Minute</key><integer>30</integer>
+    </dict>
     <dict>
       <key>Weekday</key><integer>1</integer>
       <key>Hour</key><integer>17</integer>
@@ -58,6 +77,11 @@
     </dict>
     <dict>
       <key>Weekday</key><integer>5</integer>
+      <key>Hour</key><integer>17</integer>
+      <key>Minute</key><integer>30</integer>
+    </dict>
+    <dict>
+      <key>Weekday</key><integer>6</integer>
       <key>Hour</key><integer>17</integer>
       <key>Minute</key><integer>30</integer>
     </dict>

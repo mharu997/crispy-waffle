@@ -320,10 +320,74 @@ def backfill_fundamentals(
         combined,
         w.fundamentals_facts_dir(),
         partition_col="filed_year",
+        primary_key=[
+            "cik",
+            "concept",
+            "period_start",
+            "period_end",
+            "accession_number",
+        ],
     )
     typer.echo(
         f"OK: {combined.num_rows:,} fact rows across {len(written)} year-partitioned files."
     )
+
+
+@app.command("backfill-news")
+def backfill_news(
+    start: str = typer.Option(
+        "2021-01-01",
+        help="Earliest publish/crawl date to request. NOTE: Tiingo's tier history "
+        "is rolling (~6mo on Power, longer on Enterprise). Older requests are "
+        "silently capped to whatever the tier exposes; the loader logs the "
+        "actual returned crawl_date range and warns on drift.",
+    ),
+    end: str = typer.Option(
+        "today",
+        help="Latest publish/crawl date to request. With sortBy=crawlDate, "
+        "Tiingo does not reliably enforce this upper bound; the loader logs "
+        "any drift between requested and actual range.",
+    ),
+    universe: str = typer.Option(
+        "current",
+        help="One of: current (active S&P 500), all (full historical), or comma-list",
+    ),
+    batch_size: int = typer.Option(
+        5,
+        help="Tickers per Tiingo request. Tiingo accepts comma-separated lists; "
+        "batching cuts request count proportionally.",
+    ),
+    limit: int = typer.Option(0, help="Process at most N tickers (for testing)"),
+):
+    """Backfill Tiingo news for the requested universe.
+
+    PIT note: news is filtered at read time on ``crawl_date`` (when Tiingo
+    first indexed the article), not ``published_date`` (which can be earlier
+    for backfilled articles and would silently leak future information).
+    """
+    from .constituents.fja05680 import fetch_snapshot
+    from .news.loader import backfill
+
+    end_d = dt.date.today() if end == "today" else dt.date.fromisoformat(end)
+    start_d = dt.date.fromisoformat(start)
+
+    snap = fetch_snapshot()
+    if universe == "current":
+        tickers = sorted(snap.current_snapshot["symbol"].astype(str).str.upper())
+    elif universe == "all":
+        tickers = sorted(set(snap.ticker_tenures["ticker"].astype(str).str.upper()))
+    else:
+        tickers = [t.strip().upper() for t in universe.split(",") if t.strip()]
+
+    if limit:
+        tickers = tickers[:limit]
+
+    typer.echo(
+        f"Backfilling news for {len(tickers)} tickers from {start_d} to {end_d} "
+        f"(batch_size={batch_size}) ..."
+    )
+    n = backfill(tickers, start=start_d, end=end_d, batch_size=batch_size)
+    typer.echo(f"OK: {n} news rows written.")
 
 
 @app.command("backfill-sectors")
@@ -684,32 +748,34 @@ def info():
         else:
             typer.echo(f"  {name:22s}  (not built)")
 
-    # Fundamentals facts is partitioned across N year-files; aggregate stats.
-    fdir = w.fundamentals_facts_dir()
-    files = sorted(fdir.glob("**/*.parquet")) if fdir.exists() else []
-    if files:
-        import duckdb
+    # Partitioned datasets: aggregate across all year-files.
+    for label, dir_path in [
+        ("fundamentals_facts", w.fundamentals_facts_dir()),
+        ("news",               w.news_dir()),
+    ]:
+        files = sorted(dir_path.glob("**/*.parquet")) if dir_path.exists() else []
+        if files:
+            import duckdb
 
-        con = duckdb.connect()
-        glob = str(fdir / "**" / "*.parquet")
-        total = con.sql(
-            f"SELECT COUNT(*) FROM read_parquet({glob!r}, hive_partitioning=true)"
-        ).fetchone()[0]
-        con.close()
-        total_size = sum(f.stat().st_size for f in files)
-        # Try to find the vintage from any one file
-        vintage = "?"
-        try:
-            md = pq.ParquetFile(files[0]).metadata.metadata or {}
-            vintage = md.get(b"pitds.ingestion_date", b"?").decode()
-        except Exception:
-            pass
-        typer.echo(
-            f"  {'fundamentals_facts':22s}  {total:>12,} rows  "
-            f"{total_size // 1024:>7} KB  vintage {vintage}  ({len(files)} partitions)"
-        )
-    else:
-        typer.echo(f"  {'fundamentals_facts':22s}  (not built)")
+            con = duckdb.connect()
+            glob = str(dir_path / "**" / "*.parquet")
+            total = con.sql(
+                f"SELECT COUNT(*) FROM read_parquet({glob!r}, hive_partitioning=true)"
+            ).fetchone()[0]
+            con.close()
+            total_size = sum(f.stat().st_size for f in files)
+            vintage = "?"
+            try:
+                md = pq.ParquetFile(files[0]).metadata.metadata or {}
+                vintage = md.get(b"pitds.ingestion_date", b"?").decode()
+            except Exception:
+                pass
+            typer.echo(
+                f"  {label:22s}  {total:>12,} rows  "
+                f"{total_size // 1024:>7} KB  vintage {vintage}  ({len(files)} partitions)"
+            )
+        else:
+            typer.echo(f"  {label:22s}  (not built)")
 
 
 if __name__ == "__main__":

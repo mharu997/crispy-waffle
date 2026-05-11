@@ -46,6 +46,9 @@ data/processed/
 *.log
 logs/
 
+# R session history (occasionally created when notebooks open R kernels)
+.Rhistory
+
 # DuckDB
 *.duckdb
 *.duckdb.wal
