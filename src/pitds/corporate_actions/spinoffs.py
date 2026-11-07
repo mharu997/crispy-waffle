@@ -24,65 +24,66 @@ from ..store import schemas
 # Major S&P 500 spinoffs since 2010-01-01.
 # Format: (parent_ticker, child_ticker, ex_date, parent_cik, child_cik, notes)
 KNOWN_SPINOFFS: list[dict] = [
+    # Corrected 2026-11-07: earlier revisions had parent/child reversed for
+    # most rows and wrong CIKs for GEV/EMBC. CIKs verified against EDGAR names.
     # 2012
     {
-        "parent_ticker": "PSX", "child_ticker": "COP",
+        "parent_ticker": "COP", "child_ticker": "PSX",
         "ex_date": dt.date(2012, 5, 1),
-        "parent_cik": "0001534701", "child_cik": "0001163165",
-        "notes": "Phillips 66 spun out from ConocoPhillips",
+        "parent_cik": "0001163165", "child_cik": "0001534701",
+        "notes": "Phillips 66 spun off from ConocoPhillips",
     },
     {
         "parent_ticker": "MDLZ", "child_ticker": "KRFT",
         "ex_date": dt.date(2012, 10, 2),
         "parent_cik": "0001103982", "child_cik": "0001545158",
-        "notes": "Kraft Foods Group split from Mondelez (formerly Kraft Foods Inc.)",
+        "notes": "Kraft Foods Group spun off from Kraft Foods Inc. (renamed Mondelez)",
     },
     # 2013
     {
-        "parent_ticker": "ABBV", "child_ticker": "ABT",
-        "ex_date": dt.date(2013, 1, 1),
-        "parent_cik": "0001551152", "child_cik": "0000001800",
+        "parent_ticker": "ABT", "child_ticker": "ABBV",
+        "ex_date": dt.date(2013, 1, 2),
+        "parent_cik": "0000001800", "child_cik": "0001551152",
         "notes": "AbbVie spun off from Abbott Laboratories",
     },
     # 2015
     {
-        "parent_ticker": "PYPL", "child_ticker": "EBAY",
+        "parent_ticker": "EBAY", "child_ticker": "PYPL",
         "ex_date": dt.date(2015, 7, 20),
-        "parent_cik": "0001633917", "child_cik": "0001065088",
+        "parent_cik": "0001065088", "child_cik": "0001633917",
         "notes": "PayPal spun off from eBay",
     },
     {
-        "parent_ticker": "HPE", "child_ticker": "HPQ",
-        "ex_date": dt.date(2015, 11, 1),
-        "parent_cik": "0001645590", "child_cik": "0000047217",
-        "notes": "Hewlett Packard Enterprise spun off from HP Inc.",
+        "parent_ticker": "HPQ", "child_ticker": "HPE",
+        "ex_date": dt.date(2015, 11, 2),
+        "parent_cik": "0000047217", "child_cik": "0001645590",
+        "notes": "Hewlett Packard Enterprise spun off from Hewlett-Packard (renamed HP Inc.)",
     },
     # 2019
     {
-        "parent_ticker": "DOW", "child_ticker": "DWDP",
+        "parent_ticker": "DWDP", "child_ticker": "DOW",
         "ex_date": dt.date(2019, 4, 2),
-        "parent_cik": "0001751788", "child_cik": "0001666700",
+        "parent_cik": "0001666700", "child_cik": "0001751788",
         "notes": "Dow Inc. spun off from DowDuPont",
     },
     {
-        "parent_ticker": "CTVA", "child_ticker": "DD",
+        "parent_ticker": "DD", "child_ticker": "CTVA",
         "ex_date": dt.date(2019, 6, 3),
-        "parent_cik": "0001755672", "child_cik": "0000030554",
-        "notes": "Corteva spun off from DowDuPont (now DuPont)",
-    },
-    # 2021
-    {
-        "parent_ticker": "EMBC", "child_ticker": "BMY",
-        "ex_date": dt.date(2021, 11, 1),
-        "parent_cik": "0001846253", "child_cik": "0000014272",
-        "notes": "Embecta spun off from Becton Dickinson — illustrative",
+        "parent_cik": "0001666700", "child_cik": "0001755672",
+        "notes": "Corteva spun off from DowDuPont (renamed DuPont de Nemours)",
     },
     # 2022
     {
-        "parent_ticker": "WBD", "child_ticker": "T",
-        "ex_date": dt.date(2022, 4, 8),
-        "parent_cik": "0001437107", "child_cik": "0000732717",
-        "notes": "Warner Bros. Discovery spun off from AT&T (WarnerMedia)",
+        "parent_ticker": "BDX", "child_ticker": "EMBC",
+        "ex_date": dt.date(2022, 4, 1),
+        "parent_cik": "0000010795", "child_cik": "0001872789",
+        "notes": "Embecta spun off from Becton Dickinson",
+    },
+    {
+        "parent_ticker": "T", "child_ticker": "WBD",
+        "ex_date": dt.date(2022, 4, 11),
+        "parent_cik": "0000732717", "child_cik": "0001437107",
+        "notes": "WarnerMedia spun off from AT&T and merged into Discovery (WBD)",
     },
     # 2023
     {
@@ -95,7 +96,7 @@ KNOWN_SPINOFFS: list[dict] = [
     {
         "parent_ticker": "GE", "child_ticker": "GEV",
         "ex_date": dt.date(2024, 4, 2),
-        "parent_cik": "0000040545", "child_cik": "0001996862",
+        "parent_cik": "0000040545", "child_cik": "0001996810",
         "notes": "GE Vernova spun off from General Electric",
     },
 ]
@@ -118,11 +119,13 @@ def build_spinoffs_table() -> pa.Table:
                 "spinoff_child_cik": s["child_cik"],
                 "source": "manual_curated",
                 "ingestion_date": today,
+                "perma_ticker": None,
             }
         )
     df = pd.DataFrame(rows)
     df["cik"] = df["cik"].astype("string")
     df["spinoff_child_cik"] = df["spinoff_child_cik"].astype("string")
+    df["perma_ticker"] = df["perma_ticker"].astype("string")
     return pa.Table.from_pandas(
         df, schema=schemas.CORPORATE_ACTIONS, preserve_index=False
     )

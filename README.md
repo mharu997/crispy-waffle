@@ -9,10 +9,47 @@ A survivorship-bias-free, point-in-time dataset of S&P 500 constituents, prices,
 - **Append-only**: historical rows are never overwritten. Restatements appear as new rows tagged by SEC accession number.
 - **Self-updating**: a nightly job keeps the dataset PIT going forward.
 
+## Identity: every row is tied to the right company
+
+Tickers get renamed (PCLN → BKNG), reused (STI: SunTrust → Solidion) and
+reorganized (Google Inc → Alphabet). Price vendors resolve a ticker to whoever
+holds it *today*, so a ticker-keyed pipeline silently attaches the wrong
+company's history. PITDS therefore builds a **security master** first
+(`data/processed/security_master.parquet`) mapping every post-2010 membership
+segment to:
+
+| field | source |
+|---|---|
+| `ticker_pit` — ticker *as of the date* | fja05680 label, corrected from dated Wikipedia snapshots (revision bisection for exact switch dates) |
+| `cik` — SEC entity | Wikipedia snapshot CIKs, validated against EDGAR filing activity + name history; EDGAR name search before 2014 |
+| `perma_ticker` — vendor price series | Tiingo permaTicker (pins one company across renames/reuse), chosen by trading-date coverage |
+
+Prices **and** dividends/splits are fetched from the same permaTicker series,
+adjustments are partitioned by that series, and every member-day carries a CIK.
+Hand-verified exceptions live in version-controlled CSVs, each with a reason:
+`identifiers/data/entity_overrides.csv`, `constituents/data/membership_corrections.csv`,
+`identifiers/data/ticker_labels.csv`, `corporate_actions/data/action_corrections.csv`.
+
+**Live edge.** fja05680 lags S&P announcements by weeks to months. Membership
+changes newer than the fja snapshot are taken from Wikipedia's current
+revision and dated by revision bisection (±1 day), tagged
+`wikipedia_live_edge` in `data/processed/live_edge_corrections.parquet`, and
+superseded automatically once fja catches up.
+
+### Coverage (as of 2026-11-07)
+
+| | 2010 | 2012 | 2014 | 2016 | 2018 | 2020–2026 |
+|---|---|---|---|---|---|---|
+| member-days with a CIK | 100% | 100% | 100% | 100% | 100% | 100% |
+| member-days with a (same-CIK) price | 90.8% | 93.3% | 95.8% | 98.7% | 99.6% | 99.6–100% |
+| member-days with XBRL facts filed by that date | 83.5% | 99.4% | 99.5% | 99.6% | 99.9% | 99–99.8% |
+
 ## What this dataset is NOT
 
 - **No data before 2010.** Pre-XBRL fundamentals are not freely available in PIT form.
-- **No GICS Industry/Sub-Industry historically** — only Sector. SIC code (PIT-correct from EDGAR) is the rigorous fallback.
+- **Prices missing for ~45 companies that left the index before 2016** (e.g. Dow Chemical, Goodrich, BMC, Molex, Progress Energy, Dell Inc, old Chubb, old Johnson Controls, old Allergan). Tiingo has no series for most entities delisted before 2016. These segments carry `price_status ∈ {unresolved, no_source, low_coverage}` in the security master — the gap is explicit, not silent. Backtests on 2010–2015 retain mild survivorship tilt.
+- **EDGAR companyfacts lag for ~30 combined filers.** Since spring 2026 the SEC companyfacts API omits recent 10-Q facts for several utilities/REITs (filers with co-registrant subsidiaries/OPs) and Citigroup. Facts are as complete as the API serves them.
+- **Sector history is observed quarterly** (Wikipedia snapshots), not at the exact reclassification date. SIC code (EDGAR) remains the rigorous fallback.
 - **No CRSP-style delisting returns.** Delisted-due-to-bankruptcy tickers are flagged but the last-month return underestimates true loss.
 - **No intraday data.** EOD only.
 
@@ -40,17 +77,11 @@ cp .env.example .env
 ### 3. Backfill (full Phase A+B: ~1 hour wall time)
 
 ```bash
-# Phase A — universe, prices, corporate actions
-pitds backfill-constituents
-pitds backfill-identifiers
-pitds backfill-prices --universe current --start 2010-01-01
-pitds backfill-corporate-actions --universe current
-# optional: also pull the full historical universe (delisted tickers; many will fail)
-pitds backfill-prices --universe all --start 2010-01-01
+# Identity spine → prices, corporate actions, constituents, sectors (one command)
+pitds build-security-master --refresh-wiki --refresh-meta
 
-# Phase B — fundamentals + sectors
-pitds backfill-fundamentals --universe current
-pitds backfill-sectors
+# Fundamentals for every point-in-time CIK
+pitds backfill-fundamentals --universe security-master
 
 # Phase D — news enrichment (Tiingo Power tier exposes ~3-6mo rolling window)
 pitds backfill-news --universe all --start 2010-01-01
@@ -90,7 +121,9 @@ s = api.sector(cik='0000320193', as_of=date(2024, 6, 28))
 ```bash
 pitds info                    # dataset state with vintage stamps
 pitds inspect-cik 0000320193  # PIT snapshot for one CIK
-pitds verify                  # 7 integrity + regression checks
+pitds build-security-master   # rebuild identity spine + everything keyed on it
+pitds rebuild-prices          # prices + actions from the security master's series
+pitds verify                  # 12 integrity + regression checks
 pitds validate-fred           # daily-return correlation vs FRED SP500
 pitds backtest-demo           # PIT-correct equal-weight backtest
 pitds update-daily            # nightly orchestrator (cron-friendly)

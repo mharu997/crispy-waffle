@@ -244,6 +244,10 @@ def corporate_actions_path() -> Path:
     return settings.processed_dir / "corporate_actions.parquet"
 
 
+def security_master_path() -> Path:
+    return settings.processed_dir / "security_master.parquet"
+
+
 def ticker_history_path() -> Path:
     return settings.processed_dir / "ticker_history.parquet"
 

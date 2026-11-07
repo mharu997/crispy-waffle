@@ -1,0 +1,17 @@
+# Corrections applied on top of fja05680 ticker tenures.
+#
+# fja05680 collapses a few acquirer-takes-target's-ticker mergers into one
+# tenure under the *later* ticker, which drops the acquirer's own earlier
+# membership (survivorship bias in reverse). Each row is checked against
+# Wikipedia's dated snapshots + "Selected changes" table (2026-11-07).
+#
+# action: add    → insert tenure [start_date, end_date)
+#         remove → cut [start_date, end_date) out of the ticker's tenures
+action,ticker,start_date,end_date,note
+add,ACE,2010-07-14,2016-01-15,"ACE Ltd added 2010-07-14 (replacing Millipore); acquired Chubb Corp and took the CB ticker 2016-01-15. fja has no ACE tenure."
+add,TYC,2010-08-26,2016-09-06,"Tyco International added 2010-08-26 (replacing Smith Intl); merged with Johnson Controls and took the JCI ticker 2016-09-06. fja has no TYC tenure."
+add,WPI,1999-04-12,2013-01-24,"Watson Pharmaceuticals; renamed Actavis (ACT) 2013-01-24. fja has no WPI/ACT tenure."
+add,ACT,2013-01-24,2015-06-15,"Actavis; acquired Allergan Inc 2015-03-17 and took the AGN ticker 2015-06-15."
+remove,AGN,2015-03-23,2015-06-15,"Allergan Inc was removed 2015-03-23; the AGN ticker resumed 2015-06-15 as Allergan plc (ex-Actavis), which is the ACT tenure in between."
+remove,CCEP,2016-01-04,2016-05-31,"fja duplicates the CCE tenure as CCEP for 2016-01-04..2016-05-31; Wikipedia (2016-03-30) lists only CCE. Coca-Cola European Partners formed 2016-05-28."
+remove,CPRI,2016-01-04,2018-09-19,"fja duplicates Michael Kors: KORS 2013-11-13..2018-09-19 plus CPRI from 2016-01-04. Wikipedia lists KORS continuously until the 2019-01 rename to Capri (CPRI). Keep one continuous membership."

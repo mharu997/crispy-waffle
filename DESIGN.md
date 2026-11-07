@@ -288,29 +288,34 @@ Approximately **24,000 facts per CIK** on average, **18,000+ filings** total.
 
 1. `**fja05680/sp500` GitHub** (community-maintained CSVs, monthly updates) is the baseline. We pull `sp500_ticker_start_end.csv` (one row per ticker tenure interval) and `sp500.csv` (current snapshot with CIK+sector).
 2. The `changes.materialize_daily()` function joins ticker tenures × NYSE trading-day calendar to produce the daily matrix.
-3. **Wikipedia revision history** is the live edge: scraped daily to detect changes since the last fja05680 refresh. Anomalies (diff vs fja05680) are logged via `update/notify.py` for manual review against S&P press releases — never auto-applied.
+3. **Curated corrections** (`constituents/data/membership_corrections.csv`) restore members fja05680 collapses into an acquirer's later ticker (ACE, TYC, Watson/Actavis) and remove its duplicates (CCEP 2016, CPRI 2016–2018).
+4. **Wikipedia revision history** is the live edge. Changes newer than the fja snapshot are diffed against the current revision, dated by bisecting revisions (±1 day) and **applied** as `wikipedia_live_edge` rows (`live_edge_corrections.parquet`); once fja catches up the diff disappears. (Earlier versions only logged these; with fja lagging S&P by months that left current membership wrong.) The fja-vs-Wikipedia diff is still reported via `update/notify.py`.
 
-### Identifiers (ticker → CIK)
+### Identifiers — the security master
 
-1. **SEC `company_tickers.json`** (~10K currently-active US filers): primary source.
-2. **fja05680's current snapshot** (CIK column): seed for the 503 active S&P 500 names.
-3. Ticker normalization: `BRK.B` → `BRK-B` for Tiingo/yfinance/Stooq queries (their convention vs S&P's).
-4. **OpenFIGI** (Phase B): planned for the ~40% of historical/delisted tickers SEC's currently-active feed doesn't cover.
+`identifiers/security_master.py` resolves every post-2010 membership segment in three passes:
 
-### Prices — three-tier cascade
+1. **Entity (price series).** Candidates are Tiingo `permaTicker`s whose latest ticker equals the member ticker (`/tiingo/fundamentals/meta` lists ~12K inactive entities, so reused tickers have several), plus the plain ticker for share classes. Each candidate's history is fetched once and scored by coverage of the segment's trading days. Curated overrides handle renames Tiingo files under the new ticker, reorganizations that change the company mid-tenure (IR, CB, JCI, FOXA, BHGE), and entities with no Tiingo series (`NONE`).
+2. **CIK.** Wikipedia snapshot CIKs (quarterly, since mid-2014) are the primary evidence, discarded when EDGAR contradicts them (no periodic filings in the period, or the CIK's name history doesn't match the listed security). Reorganization boundaries are placed at the successor's first periodic filing. Pre-2014 and predecessor periods use EDGAR name search over `cik-lookup-data.txt`, constrained to CIKs that filed during the period. A price-entity cross-check flags segments whose Tiingo entity maps to a *different* CIK that was already filing (this caught BBT→Beacon, JCI→Tyco, CB→ACE, AGN→Actavis, GAS→AGL, LSI→Life Storage, MIL, GENZ).
+3. **As-of ticker.** fja labels tenures with the *latest* ticker; the dated label (PCLN before BKNG, WAG before WBA, …) comes from Wikipedia snapshots with revision bisection for the switch date.
 
-For each ticker, in order:
+`ticker_history` is derived from the security master (as-of ticker → CIK windows); `constituents_daily` carries the as-of ticker and CIK for every member-day.
 
-1. **Tiingo** (paid subscription): primary EOD source. Returns clean unadjusted OHLCV, very stable API, decent delisted coverage.
-2. **yfinance**: fallback for tickers Tiingo doesn't have (mostly post-bankruptcy quotes like LEHMQ, ENRNQ, WCOEQ).
-3. **Stooq** (`pandas-datareader`): deeper fallback for very old delistings.
+### Prices — entity-keyed (`prices/entity_loader.py`)
 
-Each row carries its `source` field for provenance auditing. **96.4% Tiingo / 3.6% yfinance** in the current build.
+Prices are fetched from Tiingo **by permaTicker**, never by ticker, and labelled with the security master's as-of ticker and CIK. Series are continuous: gaps between two memberships of the same company are filled, and lookback history is kept across genuine add/remove edges but never across an entity split or where the same CIK continues under another ticker. Bars whose label would collide with another member's ticker on that date are dropped. Raw series are cached incrementally (`data/raw/tiingo/eod/`), so the nightly job only re-pulls ~2 weeks per active entity.
+
+The earlier ticker-keyed Tiingo → yfinance → Stooq cascade is retained only for ad-hoc `backfill-prices` use. Its yfinance fallback produced wrong-company rows (e.g. "BMC" through 2022, "GR" through 2018) and is no longer used for the index universe.
+
+**Known gap:** Tiingo has no series for most companies delisted before 2016, so ~45 early-period members have no prices (see README).
 
 ### Corporate actions
 
-1. **yfinance `Ticker.splits` and `Ticker.dividends`**: bulk-fetched per ticker, returns the full history.
-2. **Manual spinoffs** (`corporate_actions/spinoffs.py`): hand-curated table of 11 known S&P 500 spinoffs since 2010 (yfinance doesn't model spinoffs as a discrete event type).
+1. **Tiingo `divCash` / `splitFactor`** from the *same* permaTicker series as the prices, taken over the whole series (not only emitted bars). Tiingo encodes spin-offs as a distribution (ABT→ABBV $34.65) or an equivalent split factor (GE→GEV 1.253), which is what total-return adjustment needs.
+2. **Curated fixes** (`corporate_actions/data/action_corrections.csv`) for vendor errors: RRD's missing 2016 1:3 reverse split, BHI's duplicated merger-consideration dividend, CSC's CSRA spin-off value.
+3. **Manual spinoffs** (`corporate_actions/spinoffs.py`): metadata table of 11 major spinoffs (parent → child, both CIKs). Corrected 2026-11-07: most rows previously had parent and child reversed.
+
+Adjustment (`prices/adjust.py`) is partitioned by vendor series (`perma_ticker`), so a split after a rename (ABC → COR) still adjusts the pre-rename rows; distributions sharing an ex-date with a split are measured in post-split units; an impossible distribution (≥ prior close) is skipped and reported by `pitds verify`.
 
 ### Fundamentals — EDGAR XBRL
 

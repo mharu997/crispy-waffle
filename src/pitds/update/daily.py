@@ -14,8 +14,11 @@ The update enforces the three PIT-correctness rules from the plan:
 2. Vintage-stamped Parquet metadata — every file's ``ingestion_date`` is
    today, so backtests can be replicated exactly by reading the on-disk
    vintage.
-3. Anomaly surfacing, not silent fixes — a constituent diff that doesn't
-   match S&P press releases is *logged*, not auto-applied.
+3. Anomaly surfacing, not silent fixes — the fja-vs-Wikipedia diff is
+   reported every run. Membership changes newer than the fja snapshot are
+   applied from Wikipedia as explicitly-tagged ``wikipedia_live_edge``
+   corrections (dated by revision bisection) so current membership is
+   correct; they are superseded as soon as fja catches up.
 """
 
 from __future__ import annotations
@@ -27,7 +30,6 @@ from dataclasses import dataclass, field
 
 from ..constituents.fja05680 import fetch_snapshot
 from ..constituents.reconcile import diff_current_state
-from ..identifiers.cik_map import resolve_ciks
 from . import notify
 from .verify import format_report, run_all
 
@@ -95,98 +97,43 @@ def _step_constituents_check(run: DailyRun) -> None:
         run.add(name, False, "exception", err=str(e))
 
 
-def _step_constituent_materialize(run: DailyRun) -> None:
-    """Re-materialize constituents_daily up to today (idempotent)."""
-    name = "constituents_materialize"
+def _step_identity_rebuild(run: DailyRun) -> None:
+    """Live-edge membership → security master → prices/actions → constituents → sectors.
+
+    Replaces the old ticker-keyed price/corporate-action steps, which fetched
+    by *current* ticker and so silently attached the wrong company's history
+    to renamed or reused tickers. See update/identity.py.
+    """
+    name = "identity_rebuild"
     try:
-        from ..constituents.changes import write_constituents_outputs
+        from .identity import rebuild_identity
 
-        snap = fetch_snapshot()
-        n_daily, n_events = write_constituents_outputs(
-            snap.ticker_tenures, snap.current_snapshot
+        r = rebuild_identity(live_edge=True, prices=True, fundamentals_for_new=True)
+        msg = (
+            f"live_edge={r.live_edge_rows} sm={r.security_master_rows} "
+            f"status={r.price_status} prices={r.price_rows:,} actions={r.action_rows:,} "
+            f"new_fund_ciks={r.new_fundamentals_ciks}"
         )
-        run.add(name, True, f"{n_daily:,} daily rows, {n_events} change events", rows=n_daily)
-    except Exception as e:
-        run.add(name, False, "exception", err=traceback.format_exc().splitlines()[-1])
-
-
-def _step_prices_yesterday(run: DailyRun) -> None:
-    """Fetch yesterday's prices for the current constituent universe."""
-    name = "prices_yesterday"
-    try:
-        from ..prices.loader import backfill
-
-        snap = fetch_snapshot()
-        tickers = sorted(snap.current_snapshot["symbol"].astype(str).str.upper())
-        seed = dict(
-            zip(
-                snap.current_snapshot["symbol"].astype(str).str.upper(),
-                snap.current_snapshot["cik"].astype(str),
-                strict=False,
-            )
-        )
-        seed = {k: v for k, v in seed.items() if v and v != "<NA>" and v != "nan"}
-        cik_map = resolve_ciks(tickers, seed=seed)
-        end = dt.date.today()
-        start = end - dt.timedelta(days=4)  # safety margin for weekends
-        n = backfill(
-            tickers,
-            start=start,
-            end=end,
-            cik_resolver=lambda t: cik_map.get(t.upper()),
-        )
-        run.add(name, True, f"backfilled [{start}, {end}]", rows=n)
-    except Exception as e:
-        run.add(name, False, "exception", err=traceback.format_exc().splitlines()[-1])
-
-
-def _step_corporate_actions_yesterday(run: DailyRun) -> None:
-    """Fetch any new corporate actions for the current universe."""
-    name = "corp_actions_yesterday"
-    try:
-        from ..corporate_actions.splits_dividends import build_actions_table
-        from ..store import writer as w
-
-        snap = fetch_snapshot()
-        tickers = sorted(snap.current_snapshot["symbol"].astype(str).str.upper())
-        seed = dict(
-            zip(
-                snap.current_snapshot["symbol"].astype(str).str.upper(),
-                snap.current_snapshot["cik"].astype(str),
-                strict=False,
-            )
-        )
-        seed = {k: v for k, v in seed.items() if v and v != "<NA>" and v != "nan"}
-        cik_map = resolve_ciks(tickers, seed=seed)
-        # Quick mode: only fetch tickers that had a likely action in last 7 days.
-        # Since yfinance returns full history per call, we just refresh all.
-        table = build_actions_table(
-            tickers, cik_resolver=lambda t: cik_map.get(t.upper())
-        )
-        if table.num_rows == 0:
-            run.add(name, True, "no new actions")
-            return
-        w.upsert_single_file(
-            table, w.corporate_actions_path(),
-            primary_key=["ticker", "ex_date", "action_type"],
-            sort_by=["ticker", "ex_date"],
-        )
-        run.add(name, True, "refreshed corp actions", rows=table.num_rows)
-    except Exception as e:
+        run.add(name, True, msg, rows=r.price_rows)
+    except Exception:
         run.add(name, False, "exception", err=traceback.format_exc().splitlines()[-1])
 
 
 def _step_fundamentals_incremental(run: DailyRun) -> None:
-    """Check EDGAR submissions for any CIK with a new filing since last run."""
+    """Re-pull EDGAR facts for security-master CIKs that filed since the last run.
+
+    Uses EDGAR's daily master index (one request per business day) to find
+    filers; see fundamentals/incremental.py.
+    """
     name = "fundamentals_incremental"
     try:
-        # Phase C placeholder: a full implementation diffs each CIK's
-        # submissions.json `recent.filings.filing_date[0]` against our
-        # last-seen, then re-pulls companyfacts only for advanced CIKs.
-        # For now, defer to weekly batch.
-        run.add(name, True, "deferred to weekly batch")
-    except Exception as e:
-        run.add(name, False, "exception", err=str(e))
+        from ..fundamentals.incremental import refresh_changed
+        from ..identifiers.security_master import load_security_master
+
+        n, since, until = refresh_changed(load_security_master())
+        run.add(name, True, f"{n} CIKs refreshed for filings in ({since}, {until}]", rows=n)
+    except Exception:
+        run.add(name, False, "exception", err=traceback.format_exc().splitlines()[-1])
 
 
 def _step_news_yesterday(run: DailyRun) -> None:
@@ -245,9 +192,7 @@ def _step_verify(run: DailyRun) -> None:
 
 STEPS = [
     _step_constituents_check,
-    _step_constituent_materialize,
-    _step_prices_yesterday,
-    _step_corporate_actions_yesterday,
+    _step_identity_rebuild,
     _step_fundamentals_incremental,
     _step_news_yesterday,
     _step_verify,

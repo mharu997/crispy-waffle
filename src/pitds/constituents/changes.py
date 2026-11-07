@@ -71,21 +71,44 @@ def materialize_daily(
     con = duckdb.connect()
     con.register("days", days)
     con.register("tenures", t)
-    arrow = con.sql(
+    sm = _security_master_frame()
+    if sm is not None:
+        # Relabel each member-day with its as-of ticker and SEC CIK. The
+        # security master partitions every post-2010 tenure, so the join is
+        # 1:1; a missing match falls back to the fja label with NULL CIK.
+        con.register("sm", sm)
+        select = """
+            SELECT
+                d.date AS date,
+                COALESCE(sm.ticker_pit, t.ticker) AS ticker,
+                sm.cik AS cik,
+                CAST(NULL AS VARCHAR) AS figi,
+                FALSE AS announced_only
+            FROM days d
+            JOIN tenures t
+              ON d.date >= t.start_date
+             AND d.date <  t.end_clipped
+            LEFT JOIN sm
+              ON sm.ticker = t.ticker
+             AND d.date >= sm.valid_from
+             AND d.date <  COALESCE(sm.valid_to, DATE '9999-12-31')
+            ORDER BY 1, 2
         """
-        SELECT
-            d.date AS date,
-            t.ticker,
-            CAST(NULL AS VARCHAR) AS cik,
-            CAST(NULL AS VARCHAR) AS figi,
-            FALSE AS announced_only
-        FROM days d
-        JOIN tenures t
-          ON d.date >= t.start_date
-         AND d.date <  t.end_clipped
-        ORDER BY d.date, t.ticker
+    else:
+        select = """
+            SELECT
+                d.date AS date,
+                t.ticker,
+                CAST(NULL AS VARCHAR) AS cik,
+                CAST(NULL AS VARCHAR) AS figi,
+                FALSE AS announced_only
+            FROM days d
+            JOIN tenures t
+              ON d.date >= t.start_date
+             AND d.date <  t.end_clipped
+            ORDER BY d.date, t.ticker
         """
-    ).fetch_arrow_table()
+    arrow = con.sql(select).fetch_arrow_table()
     con.close()
 
     # Reconstruct as a Table against the canonical schema so field order,
@@ -98,6 +121,30 @@ def materialize_daily(
         "constituents_daily: %s rows for [%s, %s]", table.num_rows, start, end
     )
     return table
+
+
+def _security_master_frame() -> pd.DataFrame | None:
+    """Load the security master's (ticker, window, ticker_pit, cik) spine, if built."""
+    path = writer.security_master_path()
+    if not path.exists():
+        return None
+    sm = pd.read_parquet(path, columns=["ticker", "ticker_pit", "valid_from", "valid_to", "cik"])
+    return sm
+
+
+def _pit_identity(ticker: str, on: dt.date, sm: pd.DataFrame | None) -> tuple[str, str | None]:
+    """(as-of ticker, cik) for an fja tenure label on a date."""
+    if sm is None:
+        return ticker, None
+    m = sm.loc[
+        (sm["ticker"] == ticker)
+        & (sm["valid_from"] <= on)
+        & (sm["valid_to"].isna() | (sm["valid_to"] > on))
+    ]
+    if m.empty:
+        return ticker, None
+    r = m.iloc[0]
+    return r["ticker_pit"], r["cik"]
 
 
 def build_change_events(
@@ -116,10 +163,13 @@ def build_change_events(
     today = dt.date.today()
     rows: list[dict] = []
     cik_lookup = cik_lookup or {}
+    sm = _security_master_frame()
 
     for r in tenures.itertuples(index=False):
-        ticker = r.ticker
-        cik = cik_lookup.get(ticker)
+        # Identity as of the event date (PIT ticker + CIK) when the security
+        # master covers it; otherwise the fja label and current-snapshot CIK.
+        ticker, cik = _pit_identity(r.ticker, r.start_date, sm)
+        cik = cik or cik_lookup.get(r.ticker)
 
         rows.append(
             {
@@ -139,11 +189,13 @@ def build_change_events(
             }
         )
         if pd.notna(r.end_date):
+            last_day = r.end_date - dt.timedelta(days=1)
+            rticker, rcik = _pit_identity(r.ticker, last_day, sm)
             rows.append(
                 {
                     "event_id": str(uuid.uuid4()),
-                    "cik": cik,
-                    "ticker": ticker,
+                    "cik": rcik or cik,
+                    "ticker": rticker,
                     "figi": None,
                     "event_type": "remove",
                     "announcement_date": r.end_date,

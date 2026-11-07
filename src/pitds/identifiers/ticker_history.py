@@ -78,3 +78,39 @@ def write_initial(
     table = build_initial_ticker_history(tenures, seed_cik=seed_cik)
     writer.write_parquet(table, writer.ticker_history_path())
     return table.num_rows
+
+
+def build_from_security_master(sm: pd.DataFrame) -> pa.Table:
+    """``ticker_history`` from the security master: as-of ticker → CIK windows.
+
+    Supersedes the Phase A version, which mapped every tenure of a ticker to
+    the CIK that holds it *today* — wrong for reused tickers (DOW 2010-2017
+    is Dow Chemical, not Dow Inc) and blind to renames (PCLN → BKNG).
+    Adjacent windows with the same (ticker, cik) are merged.
+    """
+    today = dt.date.today()
+    s = sm.loc[sm["cik"].notna(), ["ticker_pit", "cik", "valid_from", "valid_to"]].copy()
+    s = s.sort_values(["ticker_pit", "valid_from"])
+    rows: list[dict] = []
+    for r in s.itertuples(index=False):
+        vt = r.valid_to if pd.notna(r.valid_to) else None
+        if rows and rows[-1]["ticker"] == r.ticker_pit and rows[-1]["cik"] == r.cik and rows[-1]["valid_to"] == r.valid_from:
+            rows[-1]["valid_to"] = vt
+            continue
+        rows.append(
+            {
+                "ticker": r.ticker_pit,
+                "cik": r.cik,
+                "valid_from": r.valid_from,
+                "valid_to": vt,
+                "source": "security_master",
+                "ingestion_date": today,
+            }
+        )
+    return pa.Table.from_pandas(pd.DataFrame(rows), schema=schemas.TICKER_HISTORY, preserve_index=False)
+
+
+def write_from_security_master(sm: pd.DataFrame) -> int:
+    table = build_from_security_master(sm)
+    writer.write_parquet(table, writer.ticker_history_path())
+    return table.num_rows

@@ -28,6 +28,7 @@ ENV/
 # Data — raw downloads and processed Parquet are too large for git
 data/raw/
 data/processed/
+data/backup_*/
 !data/raw/.gitkeep
 !data/processed/.gitkeep
 

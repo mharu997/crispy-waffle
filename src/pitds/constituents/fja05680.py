@@ -28,6 +28,7 @@ import httpx
 import pandas as pd
 
 from ..config import settings
+from .corrections import apply_corrections
 
 log = logging.getLogger(__name__)
 
@@ -43,7 +44,7 @@ REQUEST_TIMEOUT = 30.0
 class FjaSnapshot:
     """A locally-cached snapshot of fja05680 data, all three files."""
 
-    ticker_tenures: pd.DataFrame  # ticker, start_date, end_date
+    ticker_tenures: pd.DataFrame  # ticker, start_date, end_date (corrections applied)
     current_snapshot: pd.DataFrame  # symbol, security, sector, sub_industry, cik, ...
     changes_since_2019: pd.DataFrame  # date, add, remove
     fetched_on: dt.date
@@ -81,7 +82,7 @@ def fetch_snapshot(*, refresh: bool = False) -> FjaSnapshot:
     if refresh or not changes_file.exists():
         _download("sp500_changes_since_2019.csv", changes_file)
 
-    tenures = _parse_tenures(tenures_file.read_bytes())
+    tenures = apply_corrections(_parse_tenures(tenures_file.read_bytes()))
     current = _parse_current(current_file.read_bytes())
     changes = _parse_changes(changes_file.read_bytes())
 
@@ -144,7 +145,9 @@ def latest_cached_snapshot() -> FjaSnapshot | None:
         ):
             log.info("Using cached fja05680 snapshot from %s", d.name)
             return FjaSnapshot(
-                ticker_tenures=_parse_tenures((d / "sp500_ticker_start_end.csv").read_bytes()),
+                ticker_tenures=apply_corrections(
+                    _parse_tenures((d / "sp500_ticker_start_end.csv").read_bytes())
+                ),
                 current_snapshot=_parse_current((d / "sp500.csv").read_bytes()),
                 changes_since_2019=_parse_changes(
                     (d / "sp500_changes_since_2019.csv").read_bytes()

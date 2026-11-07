@@ -1,0 +1,11 @@
+# Curated as-of ticker labels, used *instead of* Wikipedia inference for the
+# listed fja tickers (where both old and new symbols coexisted in the index,
+# so revision bisection cannot locate the switch). label applies from
+# valid_from until the next row's valid_from.
+ticker,label,valid_from,note
+GOOGL,GOOG,1900-01-01,"Google Class A traded as GOOG until the 2014-04-03 Class C issuance"
+GOOGL,GOOGL,2014-04-03,"Class A moved to GOOGL; GOOG became Class C (its own fja tenure)"
+FOXA,NWSA,1900-01-01,"News Corp Class A (NWSA) until the 2013-07-01 split"
+FOXA,FOXA,2013-07-01,"Twenty-First Century Fox Class A; new News Corp took NWSA (own fja tenure)"
+UAA,UA,1900-01-01,"Under Armour Class A traded as UA until the 2016-04-08 Class C issuance"
+UAA,UAA,2016-04-08,"Class A moved to UAA; Class C took UA (own fja tenure)"

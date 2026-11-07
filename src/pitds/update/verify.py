@@ -197,31 +197,122 @@ def check_known_event_tesla_addition() -> CheckResult:
     )
 
 
-def check_known_event_ge_removal() -> CheckResult:
-    """GE was removed from S&P 500 effective 2018-06-26."""
+def check_known_event_frc_removal() -> CheckResult:
+    """First Republic was removed from the S&P 500 before the open on 2023-05-04.
+
+    (Replaces a GE check that expected a 2018-06-26 removal — that was GE
+    leaving the Dow Jones Industrial Average; GE never left the S&P 500.)
+    Also asserts GE *is* still a member on that date.
+    """
     p = writer.constituents_daily_path()
     if not p.exists():
-        return CheckResult("event_ge_remove", True, "skipped", "info")
+        return CheckResult("event_frc_remove", True, "skipped", "info")
     con = _con()
-    in_before = con.sql(
-        f"""
-        SELECT COUNT(*) FROM read_parquet({str(p)!r})
-        WHERE date = DATE '2018-06-25' AND ticker = 'GE'
-        """
+    q = lambda d, t: con.sql(  # noqa: E731
+        f"SELECT COUNT(*) FROM read_parquet({str(p)!r}) WHERE date = DATE '{d}' AND ticker = '{t}'"
     ).fetchone()[0]
-    in_after = con.sql(
-        f"""
-        SELECT COUNT(*) FROM read_parquet({str(p)!r})
-        WHERE date = DATE '2018-06-26' AND ticker = 'GE'
-        """
-    ).fetchone()[0]
+    before, after, ge = q("2023-05-03", "FRC"), q("2023-05-04", "FRC"), q("2018-06-26", "GE")
     con.close()
-    ok = in_before == 1 and in_after == 0
+    ok = before == 1 and after == 0 and ge == 1
     return CheckResult(
-        "event_ge_remove",
+        "event_frc_remove",
         ok,
-        f"GE on 2018-06-25: {in_before}, on 2018-06-26: {in_after} (expect 1, 0)",
+        f"FRC 2023-05-03: {before}, 2023-05-04: {after} (expect 1, 0); GE 2018-06-26: {ge} (expect 1)",
         "warning" if not ok else "info",
+    )
+
+
+def check_constituent_cik_coverage() -> CheckResult:
+    """Every member-day must carry a CIK (the canonical join key)."""
+    p = writer.constituents_daily_path()
+    if not p.exists():
+        return CheckResult("constituent_cik_coverage", True, "skipped", "info")
+    n, null = _con().sql(
+        f"SELECT count(*), count(*) FILTER (WHERE cik IS NULL) FROM read_parquet({str(p)!r})"
+    ).fetchone()
+    return CheckResult(
+        "constituent_cik_coverage",
+        null == 0,
+        f"{null:,}/{n:,} member-days without CIK",
+        "critical" if null else "info",
+    )
+
+
+def check_price_identity_consistency() -> CheckResult:
+    """A price row on a member's (ticker, date) must belong to that member's CIK."""
+    pp, pc = writer.prices_path(), writer.constituents_daily_path()
+    if not (pp.exists() and pc.exists()):
+        return CheckResult("price_identity_consistency", True, "skipped", "info")
+    n = _con().sql(
+        f"""
+        SELECT count(*) FROM read_parquet({str(pp)!r}) p
+        JOIN read_parquet({str(pc)!r}) c ON c.date = p.date AND c.ticker = p.ticker
+        WHERE c.cik IS DISTINCT FROM p.cik
+        """
+    ).fetchone()[0]
+    return CheckResult(
+        "price_identity_consistency",
+        n == 0,
+        f"{n:,} member-days priced with a different CIK's series" if n else "OK",
+        "critical" if n else "info",
+    )
+
+
+def check_current_members_priced() -> CheckResult:
+    """Every *current* member must resolve to a vendor series."""
+    p = writer.security_master_path()
+    if not p.exists():
+        return CheckResult("current_members_priced", True, "skipped", "info")
+    df = _con().sql(
+        f"SELECT ticker_pit, price_status FROM read_parquet({str(p)!r}) "
+        f"WHERE valid_to IS NULL AND price_status <> 'ok'"
+    ).df()
+    return CheckResult(
+        "current_members_priced",
+        df.empty,
+        "OK" if df.empty else f"unpriced current members: {df.to_dict('records')}",
+        "critical" if not df.empty else "info",
+    )
+
+
+def check_impossible_distributions() -> CheckResult:
+    """A cash distribution can't exceed the prior close (vendor missed a split)."""
+    pa_, pp = writer.corporate_actions_path(), writer.prices_path()
+    if not (pa_.exists() and pp.exists()):
+        return CheckResult("impossible_distributions", True, "skipped", "info")
+    df = _con().sql(
+        f"""
+        WITH a AS (SELECT COALESCE(perma_ticker, ticker) k, * FROM read_parquet({str(pa_)!r})),
+        p AS (SELECT COALESCE(perma_ticker, ticker) k, date, close FROM read_parquet({str(pp)!r})),
+        s AS (SELECT k, ex_date, EXP(SUM(LN(ratio))) r FROM a WHERE action_type = 'split' GROUP BY 1, 2)
+        SELECT a.ticker, a.ex_date, a.amount FROM a
+        LEFT JOIN s ON s.k = a.k AND s.ex_date = a.ex_date
+        WHERE a.action_type = 'cash_div'
+          AND a.amount >= (SELECT close FROM p WHERE p.k = a.k AND p.date < a.ex_date
+                           ORDER BY date DESC LIMIT 1) / COALESCE(s.r, 1)
+        """
+    ).df()
+    return CheckResult(
+        "impossible_distributions",
+        df.empty,
+        "OK" if df.empty else f"{len(df)} skipped by adjustment: {df.head(5).to_dict('records')}",
+        "warning" if not df.empty else "info",
+    )
+
+
+def check_live_edge_freshness(max_age_days: int = 3) -> CheckResult:
+    """The Wikipedia live-edge diff should be recomputed at least every few days."""
+    from ..constituents import live_edge as le
+
+    p = le.path()
+    if not p.exists():
+        return CheckResult("live_edge_freshness", False, "live edge never computed", "warning")
+    age = (dt.date.today() - dt.date.fromtimestamp(p.stat().st_mtime)).days
+    return CheckResult(
+        "live_edge_freshness",
+        age <= max_age_days,
+        f"live edge computed {age} day(s) ago",
+        "warning" if age > max_age_days else "info",
     )
 
 
@@ -232,7 +323,12 @@ ALL_CHECKS = [
     check_fundamentals_filed_not_future,
     check_constituent_price_coverage,
     check_known_event_tesla_addition,
-    check_known_event_ge_removal,
+    check_known_event_frc_removal,
+    check_constituent_cik_coverage,
+    check_price_identity_consistency,
+    check_current_members_priced,
+    check_impossible_distributions,
+    check_live_edge_freshness,
 ]
 
 

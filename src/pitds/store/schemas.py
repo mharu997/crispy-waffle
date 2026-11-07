@@ -123,6 +123,10 @@ PRICES = pa.schema(
         # Provenance: 'tiingo' | 'yfinance' | 'stooq'.
         pa.field("source", pa.string(), nullable=False),
         pa.field("ingestion_date", DATE, nullable=False),
+        # The vendor series this row came from (Tiingo permaTicker, or the
+        # plain ticker for share classes). Stable across renames, so it is
+        # the partition key for on-read split/dividend adjustment.
+        pa.field("perma_ticker", pa.string(), nullable=True),
     ]
 )
 
@@ -200,7 +204,7 @@ SECTOR_HISTORY = pa.schema(
 CORPORATE_ACTIONS = pa.schema(
     [
         pa.field("action_id", UUID, nullable=False),
-        pa.field("cik", CIK, nullable=False),
+        pa.field("cik", CIK, nullable=True),  # null only for entities with no SEC presence
         pa.field("ticker", TICKER, nullable=False),  # ticker on ex_date
         pa.field("ex_date", DATE, nullable=False),
         # action_type ∈ {"split", "cash_div", "stock_div", "spinoff"}.
@@ -210,6 +214,8 @@ CORPORATE_ACTIONS = pa.schema(
         pa.field("spinoff_child_cik", CIK, nullable=True),  # for spinoffs
         pa.field("source", pa.string(), nullable=False),
         pa.field("ingestion_date", DATE, nullable=False),
+        # Same series key as prices.perma_ticker; adjustment joins on it.
+        pa.field("perma_ticker", pa.string(), nullable=True),
     ]
 )
 
@@ -303,3 +309,33 @@ def get_schema(name: str) -> pa.Schema:
         raise KeyError(
             f"Unknown schema {name!r}. Known: {sorted(SCHEMAS)}"
         ) from e
+
+
+# ---------------------------------------------------------------------------
+# Security master — the identity spine
+# ---------------------------------------------------------------------------
+
+# One row per (membership tenure × entity segment × ticker label) since 2010.
+# Maps the fja05680 tenure label to the as-of ticker, the SEC entity and the
+# vendor price series, with the evidence used and any unresolved doubts.
+# Built by ``identifiers.security_master.build_security_master``.
+
+SECURITY_MASTER = pa.schema(
+    [
+        pa.field("ticker", TICKER, nullable=False),  # fja05680 tenure label
+        pa.field("ticker_pit", TICKER, nullable=False),  # ticker as of the date
+        pa.field("valid_from", DATE, nullable=False),
+        pa.field("valid_to", DATE, nullable=True),  # half-open; null = current
+        pa.field("cik", CIK, nullable=True),
+        pa.field("perma_ticker", pa.string(), nullable=True),
+        pa.field("vendor_name", pa.string(), nullable=True),
+        # ok | low_coverage | unresolved | no_source | empty_window
+        pa.field("price_status", pa.string(), nullable=False),
+        pa.field("price_coverage", pa.float64(), nullable=True),
+        pa.field("entity_method", pa.string(), nullable=True),
+        pa.field("cik_method", pa.string(), nullable=True),
+        pa.field("label_source", pa.string(), nullable=True),
+        pa.field("flags", pa.string(), nullable=True),
+        pa.field("ingestion_date", DATE, nullable=False),
+    ]
+)
